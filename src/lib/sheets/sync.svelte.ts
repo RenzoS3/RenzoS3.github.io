@@ -367,7 +367,13 @@ export async function iniciar(): Promise<void> {
 	}
 	if (!payload) {
 		const copia = leerCopia();
-		if (!copia) { sync.estado = 'error_carga'; sync.mensaje = 'No hay conexión con la Sheet y todavía no hay una copia en este teléfono.'; return; }
+		if (!copia) {
+			sync.estado = 'error_carga';
+			sync.mensaje = navigator.onLine
+				? 'No pudimos llegar a la Sheet. Si es la primera vez: revisá que el Apps Script esté implementado con acceso "Cualquier usuario" y que el enlace termine en /exec (no en /dev).'
+				: 'No hay conexión y todavía no hay una copia en este teléfono.';
+			return;
+		}
 		payload = copia;
 		try { sync.hoja = JSON.parse(localStorage.getItem('rienda_sheets_hoja') ?? 'null'); } catch { /* ignore */ }
 		sync.offline = true;
