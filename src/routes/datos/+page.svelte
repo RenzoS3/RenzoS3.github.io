@@ -1,513 +1,110 @@
 <script lang="ts">
-	import { onMount } from 'svelte';
-	import { exportarDatos, importarDatos, leerFechasBackup, resetearBase, compartirOdescargarTexto, type FechasBackup } from '$lib/db/backup';
-	import { crearAutobackup, listarAutobackups, leerAutobackup, type AutobackupItem } from '$lib/db/autobackup';
-	import { leerMeta, setMeta, type Metadatos } from '$lib/db/meta';
-	import { leerEstadoStorage, formatBytesMB, type EstadoStorage } from '$lib/db/senales';
-	import {
-		descargarBlob,
-		exportarFinanzasXLSX, prepararFinanzasXLSX, confirmarFinanzasXLSX,
-		exportarInversionesXLSX, prepararInversionesXLSX, confirmarInversionesXLSX,
-		type DiagnosticoHoja, type ReporteFinanzas, type ReporteInversiones
-	} from '$lib/db/precarga';
+	// Rienda + Sheets: "Tus datos" muestra la conexión con la Google Sheet.
+	// Ya no hay copias de seguridad ni importación/borrado local: la Sheet es la
+	// fuente de verdad y el respaldo a la vez.
+	import { sync, recargarDesdeSheet } from '$lib/sheets/sync.svelte';
+	import { borrarConexion } from '$lib/sheets/conexion';
+	import { descargarBlob, exportarFinanzasXLSX } from '$lib/db/precarga';
 	import { hoyISO, fechaHoraCorta } from '$lib/format';
-	import { ErrorValidacion } from '$lib/errores';
-	import { fotosYaReparadas, repararFotosPPC } from '$lib/cartera';
 	import Guia from '$lib/Guia.svelte';
 	import InstalarApp from '$lib/InstalarApp.svelte';
-	import PopupAuditoria from '$lib/PopupAuditoria.svelte';
 
-	let meta = $state<Metadatos>({ ultima_importacion: null, ultima_edicion_finanzas: null, ultima_edicion_inversiones: null, ultima_exportacion: null, autobackup_ultimo_ok: null, autobackup_ultimo_error: null });
-	let cargando = $state(true);
-	let importInput: HTMLInputElement | undefined = $state();
+	let recargando = $state(false);
+	let msg = $state('');
 
-	// Estado de la comparación previa al importar
-	let comparando = $state(false);
-	let fechasBackup = $state<FechasBackup | null>(null);
-	let backupPendiente = $state<any>(null);
-	let autobackups = $state<AutobackupItem[]>([]);
-
-	// Estado del borrado total
-	let reseteando = $state(false);
-	let textoConfirm = $state('');
-	let borrando = $state(false);
-	let puedeBorrar = $derived(textoConfirm.trim().toUpperCase() === 'BORRAR');
-
-	// Bloque A — migración única: repara fotos guardadas con precio de compra en
-	// vez de precio de mercado (ver repararFotosPPC en cartera.ts). null mientras
-	// no se sabe todavía si hace falta (recién chequeado en cargar()), para no
-	// mostrar ni ocultar el botón de arranque.
-	let fotosReparadas = $state<boolean | null>(null);
-	let reparando = $state(false);
-	let progresoReparacion = $state({ hecho: 0, total: 0 });
-
-	// Estado de almacenamiento (Blindaje iOS, Bloque 5): persistencia + espacio
-	// usado, tomados de las mismas señales que lee el arranque (Bloque 1). Se
-	// recalcula acá (llamada liviana de la Storage API, no toca la base) en vez
-	// de heredar el valor leído al arrancar la app.
-	let estadoStorage = $state<EstadoStorage>({ persistido: null, usage: null, quota: null });
-
-	async function cargar() {
-		meta = await leerMeta();
-		autobackups = await listarAutobackups();
-		fotosReparadas = await fotosYaReparadas();
-		estadoStorage = await leerEstadoStorage();
-		cargando = false;
-	}
-	onMount(cargar);
-
-	async function onRepararFotos() {
-		reparando = true;
-		progresoReparacion = { hecho: 0, total: 0 };
-		try {
-			await repararFotosPPC((hecho, total) => { progresoReparacion = { hecho, total }; });
-			fotosReparadas = true;
-		} catch (e: any) {
-			// No se marca como completo: el flag solo se escribe al final del barrido
-			// entero (ver repararFotosPPC), así que un corte a mitad de camino queda
-			// bien reflejado — la próxima corrida retoma desde el principio.
-			console.error(e);
-			alert('Ocurrió un error reparando las fotos. Podés reintentar cuando quieras.');
-		}
-		reparando = false;
-	}
-
-	// Timestamp de sistema: delega en el helper único de format.ts (Brief H / A2+B2).
-	// OJO: cambio visible sancionado — antes mostraba el año ("28/07/2026 14:30"),
-	// ahora sin año ("28/07 14:30"), igual que el mismo timestamp en Inversiones.
-	function fmt(iso: string | null): string {
-		return fechaHoraCorta(iso, 'Nunca');
-	}
-
-	// Días desde una fecha ISO guardada, sin new Date() (Date.parse sobre el ISO
-	// absoluto + Date.now; no hay corrimiento de día). null si nunca.
-	function diasDesde(iso: string | null): number | null {
-		if (!iso) return null;
-		const ms = Date.parse(iso);
-		if (Number.isNaN(ms)) return null;
-		return Math.floor((Date.now() - ms) / 86400000);
-	}
-	const diasCopia = $derived(diasDesde(meta.ultima_exportacion));
-	const copiaVieja = $derived(diasCopia === null || diasCopia > 30);
-	// Blindaje iOS (Brief 2): aviso si hace más de 2 días que no hay autobackup
-	// (o nunca hubo). Umbral propio, distinto del de la copia manual (30 días).
-	const diasAutobackup = $derived(diasDesde(meta.autobackup_ultimo_ok));
-	const autobackupViejo = $derived(diasAutobackup === null || diasAutobackup > 2);
-	const textoCopia = $derived(
-		diasCopia === null ? 'Todavía no descargaste ninguna copia'
-		: diasCopia === 0 ? 'Última copia: hoy'
-		: diasCopia === 1 ? 'Última copia: hace 1 día'
-		: `Última copia: hace ${diasCopia} días`
-	);
-
-	// true si el backup es más viejo que la base actual en ese módulo
-	function masViejo(actual: string | null, backup: string | null): boolean {
-		if (!actual || !backup) return false;
-		return backup < actual;
-	}
-
-	async function onExportar() {
-		try { await exportarDatos(); }
-		catch (e: any) { console.error(e); alert('Ocurrió un error. Contactá al administrador.'); }
-	}
-
-	// Paso 1: elegir archivo -> leer fechas y mostrar comparación
-	async function onElegirArchivo(e: Event) {
-		const input = e.target as HTMLInputElement;
-		const file = input.files?.[0];
-		if (!file) return;
-		try {
-			const { backup, fechas } = await leerFechasBackup(file);
-			fechasBackup = fechas;
-			backupPendiente = backup;
-			comparando = true;
-		} catch (err: any) {
-			if (err instanceof ErrorValidacion) alert(err.message);
-			else { console.error(err); alert('Ocurrió un error. Contactá al administrador.'); }
-		} finally {
-			input.value = '';
+	async function onRecargar() {
+		recargando = true;
+		msg = '';
+		const ok = await recargarDesdeSheet();
+		if (!ok) {
+			msg = 'Hay cambios que todavía no se pudieron guardar en la Sheet. Probá de nuevo cuando tengas señal.';
+			recargando = false;
 		}
 	}
 
-	// Paso 2: confirmar la importación
-	async function confirmarImport() {
-		try {
-			await crearAutobackup(); // red de seguridad antes de pisar
-			await importarDatos(backupPendiente);
-			await setMeta('ultima_importacion', new Date().toISOString());
-			alert('Importación completa. La página se va a recargar.');
-			location.reload();
-		} catch (err: any) {
-			if (err instanceof ErrorValidacion) alert(err.message);
-			else { console.error(err); alert('Ocurrió un error. Contactá al administrador.'); }
-			cancelarImport();
-		}
-	}
-
-	function cancelarImport() {
-		comparando = false;
-		fechasBackup = null;
-		backupPendiente = null;
-	}
-
-	// Restaurar una copia automatica: entra al MISMO flujo de comparacion que un import.
-	async function restaurarAuto(nombre: string) {
-		try {
-			const texto = await leerAutobackup(nombre);
-			const { backup, fechas } = await leerFechasBackup(texto);
-			fechasBackup = fechas; backupPendiente = backup; comparando = true;
-			window.scrollTo({ top: 0, behavior: 'smooth' });
-		} catch (err: any) {
-			if (err instanceof ErrorValidacion) alert(err.message);
-			else { console.error(err); alert('Ocurrió un error. Contactá al administrador.'); }
-		}
-	}
-
-	// Descargar/compartir una copia automatica puntual (Blindaje iOS, Brief 2):
-	// mismo mecanismo que exportarDatos() (.txt/text-plain, share con fallback
-	// a descarga). El nombre real ya trae el prefijo+fecha correctos.
-	async function onDescargarAuto(nombre: string) {
-		try {
-			const texto = await leerAutobackup(nombre);
-			await compartirOdescargarTexto(texto, nombre.replace(/\.json$/, ''));
-		} catch (err) {
-			console.error(err);
-			alert('Ocurrió un error. Contactá al administrador.');
-		}
-	}
-
-	// ----- Planillas: un .xlsx por módulo, carga y descarga a la vez -----
-	let finanzasInput: HTMLInputElement | undefined = $state();
-	let inversionesInput: HTMLInputElement | undefined = $state();
-	let importandoFinanzas = $state(false);
-	let importandoInversiones = $state(false);
-
-	// Popup de auditoría previa (Parte 1 del brief): "preparar" arma el
-	// diagnóstico sin tocar la base; "confirmar" recién ahí inserta.
-	let popupAbierto = $state(false);
-	let popupModulo = $state<'finanzas' | 'inversiones'>('finanzas');
-	let popupDiagnosticos = $state<DiagnosticoHoja[]>([]);
-	let reporteFinanzas: ReporteFinanzas | null = null;
-	let reporteInversiones: ReporteInversiones | null = null;
-	let confirmandoPopup = $state(false);
-
-	async function onExportarFinanzas() {
+	async function onExcel() {
 		try {
 			descargarBlob(`rienda-finanzas-${hoyISO()}.xlsx`, await exportarFinanzasXLSX());
-		} catch (e: any) { console.error(e); alert('Ocurrió un error. Contactá al administrador.'); }
-	}
-
-	async function onImportarFinanzas(e: Event) {
-		const input = e.target as HTMLInputElement;
-		const file = input.files?.[0];
-		if (!file) return;
-		importandoFinanzas = true;
-		try {
-			reporteFinanzas = await prepararFinanzasXLSX(file);
-			popupDiagnosticos = [reporteFinanzas.gastos.diagnostico, reporteFinanzas.ingresos.diagnostico];
-			popupModulo = 'finanzas';
-			popupAbierto = true;
-		} catch (err: any) {
-			console.error(err); alert('Ocurrió un error. Contactá al administrador.');
-		} finally {
-			input.value = '';
-			importandoFinanzas = false;
-		}
-	}
-
-	async function onExportarInversiones() {
-		try {
-			descargarBlob(`rienda-inversiones-${hoyISO()}.xlsx`, await exportarInversionesXLSX());
-		} catch (e: any) { console.error(e); alert('Ocurrió un error. Contactá al administrador.'); }
-	}
-
-	async function onImportarInversiones(e: Event) {
-		const input = e.target as HTMLInputElement;
-		const file = input.files?.[0];
-		if (!file) return;
-		importandoInversiones = true;
-		try {
-			reporteInversiones = await prepararInversionesXLSX(file);
-			popupDiagnosticos = [reporteInversiones.activos.diagnostico, reporteInversiones.renta.diagnostico, reporteInversiones.caja.diagnostico];
-			popupModulo = 'inversiones';
-			popupAbierto = true;
-		} catch (err: any) {
-			console.error(err); alert('Ocurrió un error. Contactá al administrador.');
-		} finally {
-			input.value = '';
-			importandoInversiones = false;
-		}
-	}
-
-	// Aceptar del popup: autobackup primero (misma red de seguridad que el
-	// restore de JSON), después confirma con lo que ya calculó "preparar"
-	// (no relee el archivo).
-	async function onAceptarPopup() {
-		confirmandoPopup = true;
-		try {
-			await crearAutobackup();
-			let resumen = '';
-			if (popupModulo === 'finanzas' && reporteFinanzas) resumen = await confirmarFinanzasXLSX(reporteFinanzas);
-			else if (popupModulo === 'inversiones' && reporteInversiones) resumen = await confirmarInversionesXLSX(reporteInversiones);
-			popupAbierto = false;
-			alert('Importación completa ✅\n' + resumen);
-		} catch (err: any) {
-			console.error(err); alert('Ocurrió un error. Contactá al administrador.');
-		} finally {
-			confirmandoPopup = false;
-			reporteFinanzas = null;
-			reporteInversiones = null;
-		}
-	}
-
-	function onCerrarPopup() {
-		popupAbierto = false;
-		reporteFinanzas = null;
-		reporteInversiones = null;
-	}
-
-	// ----- Borrado total -----
-	function abrirReset() {
-		textoConfirm = '';
-		reseteando = true;
-	}
-
-	function cerrarReset() {
-		reseteando = false;
-		textoConfirm = '';
-	}
-
-	async function confirmarReset() {
-		if (!puedeBorrar || borrando) return;
-		borrando = true;
-		try {
-			await crearAutobackup(); // red de seguridad antes de borrar
-			await resetearBase();
-			alert('Listo. Se borraron todos los datos de este dispositivo. La app vuelve al inicio.');
-			location.reload();
-		} catch (e: any) {
+		} catch (e) {
 			console.error(e);
-			alert('Ocurrió un error. Contactá al administrador.');
-			borrando = false;
+			alert('No se pudo generar el Excel.');
 		}
 	}
-</script>
 
-<PopupAuditoria
-	abierto={popupAbierto}
-	modulo={popupModulo}
-	diagnosticos={popupDiagnosticos}
-	procesando={confirmandoPopup}
-	onAceptar={onAceptarPopup}
-	onCerrar={onCerrarPopup}
-/>
+	function onDesconectar() {
+		if (sync.pendientes > 0) {
+			alert('Hay cambios sin guardar en la Sheet. Esperá a tener señal antes de desconectar.');
+			return;
+		}
+		if (!confirm('¿Desconectar este teléfono de la Sheet? Tus datos siguen en la Sheet; vas a tener que pegar el enlace de nuevo.')) return;
+		borrarConexion();
+		location.href = '/';
+	}
+
+	const estadoTexto = $derived(
+		sync.guardado === 'guardando' ? 'Guardando…'
+		: sync.guardado === 'error' ? 'Error al guardar'
+		: sync.pendientes > 0 ? `${sync.pendientes} cambio(s) sin guardar`
+		: 'Todo guardado'
+	);
+</script>
 
 <div class="titulo-guia">
 	<h1>Tus datos</h1>
 	<Guia
-		clave="datos"
-		para="Respaldar tus datos, que viven solo en este dispositivo."
-		uso="Descargá la copia de seguridad JSON seguido y guardala fuera del teléfono: es tu único respaldo total. Las planillas Excel no son respaldo, solo mueven datos entre Rienda y una planilla."
+		clave="datos-sheets"
+		para="Ver dónde están tus datos y si está todo guardado."
+		uso="Tus datos viven en tu Google Sheet. La app la baja al abrir y guarda cada cambio ahí. Si estás sin señal, los cambios esperan en el teléfono y se suben solos."
 	/>
 </div>
 
-{#if cargando}
-	<p>Cargando…</p>
-{:else}
-	<!-- Estado: lo que se mira de un vistazo (fijo, no colapsable) -->
-	<div class="estado" class:vieja={copiaVieja}>
-		<span class="est-main">{copiaVieja ? '⚠️ ' : ''}{textoCopia}.</span>
-		{#if copiaVieja}<span class="est-sub">Tus datos viven solo en este teléfono — descargá la copia JSON abajo (tu único respaldo total).</span>{/if}
-		<span class="est-sub">Almacenamiento persistente: {estadoStorage.persistido === null ? 'desconocido' : estadoStorage.persistido ? 'sí' : 'no'} · Espacio usado: {formatBytesMB(estadoStorage.usage)}{estadoStorage.quota !== null ? ` de ${formatBytesMB(estadoStorage.quota)}` : ''}</span>
-	</div>
+<div class="estado" class:vieja={sync.guardado === 'error' || sync.offline}>
+	<span class="est-main">{estadoTexto}</span>
+	<span class="est-sub">
+		{#if sync.hoja}Sheet: <a href={sync.hoja.url} target="_blank" rel="noopener">{sync.hoja.nombre}</a> · {/if}
+		Bajada {fechaHoraCorta(sync.ultimaCarga, '—')}{#if sync.ultimoGuardado} · último guardado {fechaHoraCorta(sync.ultimoGuardado)}{/if}
+	</span>
+	{#if sync.offline}<span class="est-sub">Sin conexión: estás viendo la copia de este teléfono.</span>{/if}
+	{#if sync.guardado === 'error' && sync.mensaje}<span class="est-sub">{sync.mensaje}</span>{/if}
+</div>
 
-	<!-- Comparación antes de restaurar (cuando elegiste una copia) -->
-	{#if comparando && fechasBackup}
-		<div class="comparacion">
-			<h2>Comparación antes de restaurar</h2>
-			<div class="tabla-scroll">
-			<table>
-				<thead><tr><th></th><th>Tu base actual</th><th>La copia</th></tr></thead>
-				<tbody>
-					<tr>
-						<td>Edición de Finanzas</td>
-						<td class="val">{fmt(meta.ultima_edicion_finanzas)}</td>
-						<td class="val" class:rojo={masViejo(meta.ultima_edicion_finanzas, fechasBackup.edicion_finanzas)}>
-							{fechasBackup.tieneMeta ? fmt(fechasBackup.edicion_finanzas) : 'Desconocido'}
-						</td>
-					</tr>
-					<tr>
-						<td>Edición de Inversiones</td>
-						<td class="val">{fmt(meta.ultima_edicion_inversiones)}</td>
-						<td class="val" class:rojo={masViejo(meta.ultima_edicion_inversiones, fechasBackup.edicion_inversiones)}>
-							{fechasBackup.tieneMeta ? fmt(fechasBackup.edicion_inversiones) : 'Desconocido'}
-						</td>
-					</tr>
-				</tbody>
-			</table>
-			</div>
+<div class="acc">
+	<button class="btn btn-primary" disabled={recargando} onclick={onRecargar}>{recargando ? 'Recargando…' : 'Recargar desde la Sheet'}</button>
+	<button class="btn btn-secondary" onclick={onExcel}>Descargar Excel (formato RIENDA)</button>
+</div>
+{#if msg}<p class="nota aviso">{msg}</p>{/if}
 
-			{#if !fechasBackup.tieneMeta}
-				<p class="aviso">Esta copia es de una versión anterior y no tiene información de fechas, así que no se puede comparar. Revisá bien antes de continuar.</p>
-			{:else if masViejo(meta.ultima_edicion_finanzas, fechasBackup.edicion_finanzas) || masViejo(meta.ultima_edicion_inversiones, fechasBackup.edicion_inversiones)}
-				<p class="aviso rojo">⚠ La copia tiene datos más viejos que tu base actual (en rojo). Si restaurás, perdés lo que cargaste después de esa fecha en este dispositivo.</p>
-			{:else}
-				<p class="aviso ok">La copia está al día o es más reciente que tu base actual.</p>
-			{/if}
-
-			<p class="recordatorio">Restaurar <strong>reemplaza TODOS</strong> los datos de este dispositivo por los de la copia.</p>
-			<div class="botones">
-				<button class="btn btn-secondary" onclick={cancelarImport}>Cancelar</button>
-				<button class="btn btn-danger-solid" onclick={confirmarImport}>Restaurar de todos modos</button>
-			</div>
-		</div>
-	{/if}
-
-	<!-- Copia de seguridad JSON: el ÚNICO respaldo total -->
+{#if sync.avisos.length}
 	<details class="sec" open>
-		<summary>Copia de seguridad (JSON)</summary>
+		<summary>Filas de la Sheet que no se pudieron leer ({sync.avisos.length})</summary>
 		<div class="sec-body">
-			<p class="nota"><strong>Es el único respaldo total.</strong> Un archivo <strong>JSON</strong> con TODO (gastos, ingresos, inversiones, configuración y perfil). Es lo único que te deja <strong>recuperar todo</strong> si cambiás de teléfono o se borran los datos. Descargala seguido y guardala <strong>fuera del teléfono</strong> (mail, Drive, etc.). Restaurar <strong>reemplaza todo</strong> y vuelve exactamente a ese punto.</p>
-			<div class="acc">
-				<button class="btn btn-primary" onclick={onExportar}>⬇ Descargar copia (JSON)</button>
-				<button class="btn btn-secondary" onclick={() => importInput?.click()}>⬆ Restaurar copia</button>
-				<input type="file" accept=".json,.txt,text/plain,application/json" bind:this={importInput} onchange={onElegirArchivo} style="display:none" />
-			</div>
-			<details class="subsec">
-				<summary>Detalle de fechas</summary>
-				<div class="tabla-scroll">
-				<table class="fechas">
-					<tbody>
-						<tr><td>Última importación</td><td class="val">{fmt(meta.ultima_importacion)}</td></tr>
-						<tr><td>Última edición de Finanzas</td><td class="val">{fmt(meta.ultima_edicion_finanzas)}</td></tr>
-						<tr><td>Última edición de Inversiones</td><td class="val">{fmt(meta.ultima_edicion_inversiones)}</td></tr>
-					</tbody>
-				</table>
-				</div>
-				<p class="nota">"Última edición" = cuándo cargaste o modificaste datos, por módulo. Actualizar cotizaciones no cuenta.</p>
-			</details>
-		</div>
-	</details>
-
-	<!-- Planillas Excel: NO son respaldo, mueven datos entre Rienda y una planilla.
-	     Un .xlsx por módulo, siempre generado con tu data actual: sirve para
-	     bajar (mirar/editar en Excel) y para volver a subir (el mismo archivo). -->
-	<details class="sec">
-		<summary>Planillas (Excel)</summary>
-		<div class="sec-body">
-			<p class="nota"><strong>No son un respaldo</strong> — para eso está la copia JSON de arriba. Cada Excel sale poblado con tu data actual: bajalo, editalo o agregá filas, y subilo de nuevo. Importar <strong>AGREGA</strong>: no pisa ni borra lo que ya tenés y omite duplicados.</p>
-			<p class="nota"><strong>Finanzas</strong> (hojas Gastos · Ingresos). Crea categorías y tarjetas que falten.</p>
-			<div class="acc">
-				<button class="btn btn-secondary" onclick={onExportarFinanzas}>⬇ Excel Finanzas</button>
-				<button class="btn btn-primary" disabled={importandoFinanzas} onclick={() => finanzasInput?.click()}>⬆ Importar Finanzas (agrega)</button>
-				<input type="file" accept=".xlsx" bind:this={finanzasInput} onchange={onImportarFinanzas} style="display:none" />
-			</div>
-			<p class="nota"><strong>Inversiones</strong> (hojas Activos · Renta y amortización · Caja). La hoja Activos crea activos y cuentas que falten; Renta y amortización necesita que el ticker ya exista.</p>
-			<div class="acc">
-				<button class="btn btn-secondary" onclick={onExportarInversiones}>⬇ Excel Inversiones</button>
-				<button class="btn btn-primary" disabled={importandoInversiones} onclick={() => inversionesInput?.click()}>⬆ Importar Inversiones (agrega)</button>
-				<input type="file" accept=".xlsx" bind:this={inversionesInput} onchange={onImportarInversiones} style="display:none" />
-			</div>
-		</div>
-	</details>
-
-	<!-- Bloque A: migración única de reparación. Solo se muestra si todavía hace
-	     falta (fotosReparadas === false); una vez corrida, desaparece sola. -->
-	{#if fotosReparadas === false}
-	<details class="sec" open>
-		<summary>Mantenimiento</summary>
-		<div class="sec-body">
-			<p class="nota">Reparación única de fotos históricas: algunas quedaron guardadas con el precio de <strong>compra</strong> en vez del precio de <strong>mercado</strong> (bug ya corregido). Recalcula todas las fotos existentes contra el histórico de precios. No cierres esta pestaña mientras corre.</p>
-			{#if reparando}
-				<p class="nota">Reparando… {progresoReparacion.hecho}/{progresoReparacion.total}</p>
-			{:else}
-				<button class="btn btn-primary" onclick={onRepararFotos}>Reparar fotos históricas</button>
-			{/if}
-		</div>
-	</details>
-	{/if}
-
-	<!-- Últimas 7 versiones (deshacer) -->
-	<details class="sec">
-		<summary>Últimas 7 versiones</summary>
-		<div class="sec-body">
-			<p class="nota">Función deshacer: la app guarda sola tus últimas 7 versiones — antes de cada cambio grande y una vez por día (Blindaje iOS). ¿Te equivocaste? Volvé a cualquiera, o descargala/compartila para guardarla fuera del teléfono. ⚠️ Viven en este teléfono. Para no perder tus datos, descargá la copia JSON (arriba).</p>
-			<p class="nota">{#if meta.autobackup_ultimo_ok}Última copia automática: {fmt(meta.autobackup_ultimo_ok)}.{:else}Todavía no se generó ninguna copia automática.{/if}</p>
-			{#if autobackupViejo}<p class="aviso rojo">⚠ Hace más de 2 días que no hay copia automática.</p>{/if}
-			{#if autobackups.length}
-				<ul class="autolist">
-					{#each autobackups as a (a.nombre)}
-						<li>
-							<span class="auto-fecha">{a.fecha}</span>
-							<span class="auto-size">{(a.size / 1024).toFixed(0)} KB</span>
-							<button class="btn btn-secondary" onclick={() => onDescargarAuto(a.nombre)}>⬇ Descargar/compartir</button>
-							<button class="btn btn-secondary" onclick={() => restaurarAuto(a.nombre)}>Volver a esta</button>
-						</li>
-					{/each}
-				</ul>
-			{:else}
-				<p class="nota">Todavía no hay versiones guardadas (se crean al importar, al borrar, o automáticamente una vez por día).</p>
-			{/if}
-		</div>
-	</details>
-
-	<!-- Instalar la app -->
-	<details class="sec">
-		<summary>Instalar la app</summary>
-		<div class="sec-body">
-			<p class="nota">Instalada es más rápida, funciona sin conexión y ayuda a que no se borren tus datos (clave en iPhone/iPad).</p>
-			<InstalarApp mostrarInstalada dismissible={false} />
-		</div>
-	</details>
-
-	<!-- Zona peligrosa -->
-	<details class="sec peligro">
-		<summary>Zona peligrosa</summary>
-		<div class="sec-body">
-			{#if !reseteando}
-				<p class="peligro-desc">Borra todos los datos de este dispositivo y devuelve la app al inicio. Es irreversible.</p>
-				<button class="btn btn-danger-outline" onclick={abrirReset}>Borrar todos mis datos</button>
-			{:else}
-				<p class="peligro-desc">
-					Vas a borrar <strong>todo</strong>: gastos, ingresos, inversiones, configuración y perfil.
-					No se puede deshacer. Si todavía no tenés una copia, descargala ahora.
-				</p>
-				<button class="btn btn-primary exp-reset" onclick={onExportar}>⬇ Descargar copia primero</button>
-				<label class="lbl-confirm" for="confirm-borrar">Escribí <strong>BORRAR</strong> para confirmar:</label>
-				<input
-					id="confirm-borrar"
-					class="input-confirm"
-					type="text"
-					bind:value={textoConfirm}
-					placeholder="BORRAR"
-					autocapitalize="characters"
-					autocorrect="off"
-					autocomplete="off"
-					spellcheck="false"
-				/>
-				<div class="botones">
-					<button class="btn btn-secondary" onclick={cerrarReset}>Cancelar</button>
-					<button class="btn btn-danger-solid" disabled={!puedeBorrar || borrando} onclick={confirmarReset}>
-						{borrando ? 'Borrando…' : 'Borrar todo'}
-					</button>
-				</div>
-			{/if}
+			<p class="nota">No aparecen en la app hasta que se corrijan en la Sheet. No se borró nada.</p>
+			<ul class="avisos">{#each sync.avisos as a (a)}<li>{a}</li>{/each}</ul>
 		</div>
 	</details>
 {/if}
 
+<details class="sec">
+	<summary>Instalar en el teléfono</summary>
+	<div class="sec-body"><InstalarApp mostrarInstalada dismissible={false} /></div>
+</details>
+
+<details class="sec peligro">
+	<summary>Desconectar este teléfono</summary>
+	<div class="sec-body">
+		<p class="nota">Saca el enlace de conexión de este teléfono. No borra nada de la Sheet.</p>
+		<div class="acc"><button class="btn btn-secondary" onclick={onDesconectar}>Desconectar</button></div>
+	</div>
+</details>
+
 <style>
 	:global(body) { max-width: 820px; margin: 0 auto; padding: 16px; }
-	h2 { font-size: 1.02rem; margin-top: 0; border-left: 3px solid var(--accent); padding-left: 12px; }
-
-	/* Estado (fijo arriba) */
 	.estado { border: 1px solid var(--border); background: var(--surface); border-radius: 8px; padding: 10px 14px; margin: 10px 0 14px; display: flex; flex-direction: column; gap: 3px; }
 	.estado.vieja { border-color: var(--warn); background: rgba(251, 191, 36, 0.08); }
 	.est-main { font-weight: 600; font-size: 0.92rem; }
 	.est-sub { font-size: 0.8rem; color: var(--text-dim); }
-
-	/* Secciones colapsables */
-	.sec { border: 1px solid var(--border); background: var(--surface); border-radius: 8px; margin: 0 0 10px; }
+	.est-sub a { color: var(--accent); }
+	.sec { border: 1px solid var(--border); background: var(--surface); border-radius: 8px; margin: 14px 0 10px; }
 	.sec > summary { cursor: pointer; padding: 12px 14px; font-weight: 600; font-size: 0.95rem; list-style: none; display: flex; align-items: center; justify-content: space-between; }
 	.sec > summary::after { content: '▸'; color: var(--text-dim); }
 	.sec[open] > summary::after { content: '▾'; }
@@ -515,42 +112,9 @@
 	.sec-body { padding: 0 14px 14px; display: flex; flex-direction: column; gap: 10px; }
 	.sec.peligro { border-color: var(--neg); margin-top: 22px; }
 	.sec.peligro > summary { color: var(--neg); }
-
-	/* Botones de tamaño uniforme (full-width, sin corrimiento en móvil) */
 	.acc { display: flex; flex-direction: column; gap: 8px; }
 	.acc :global(.btn) { width: 100%; box-sizing: border-box; text-align: center; }
-
-	.subsec { border-top: 1px solid var(--border); padding-top: 8px; }
-	.subsec > summary { cursor: pointer; font-size: 0.84rem; color: var(--text-dim); }
-
 	.nota { font-size: 0.82rem; color: var(--text-dim); margin: 0; line-height: 1.5; }
-	.nota strong { color: var(--text); }
-
-	/* Comparación previa a restaurar */
-	.comparacion { border: 1px solid var(--warn); background: var(--surface); border-radius: 8px; padding: 14px; margin: 0 0 14px; }
-	.comparacion h2 { margin-top: 0; }
-	table { border-collapse: collapse; width: 100%; font-size: 0.9rem; }
-	.fechas { max-width: 420px; }
-	td, th { padding: 7px 9px; text-align: left; }
-	th { color: var(--text-dim); }
-	td.val, th:nth-child(n+2) { text-align: right; font-weight: 600; }
-	td.rojo { color: var(--neg) !important; }
-	.aviso { font-size: 0.85rem; margin: 12px 0 6px; line-height: 1.5; }
-	.aviso.rojo { color: var(--neg); font-weight: 600; }
-	.aviso.ok { color: var(--pos); }
-	.recordatorio { font-size: 0.82rem; color: var(--text-dim); margin: 6px 0 12px; }
-	.botones { display: flex; gap: 10px; flex-wrap: wrap; }
-
-	/* Versiones (deshacer) */
-	.autolist { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 6px; }
-	.autolist li { display: flex; align-items: center; gap: 10px; border: 1px solid var(--border); background: var(--surface-2); border-radius: 8px; padding: 7px 12px; }
-	.auto-fecha { flex: 1; font-size: 0.88rem; }
-	.auto-size { color: var(--text-dim); font-size: 0.8rem; }
-
-	/* Zona peligrosa */
-	.peligro-desc { font-size: 0.85rem; color: var(--text-dim); line-height: 1.5; margin: 0; }
-	.exp-reset { align-self: flex-start; }
-	.lbl-confirm { font-size: 0.85rem; }
-	.input-confirm { width: 100%; max-width: 240px; box-sizing: border-box; padding: 9px 12px; font-size: 1rem; border: 1px solid var(--border); border-radius: 6px; background: var(--surface-2); color: var(--text); letter-spacing: 0.05em; }
-	.input-confirm:focus { outline: none; border-color: var(--neg); }
+	.aviso { margin-top: 10px; color: var(--warn); }
+	ul.avisos { margin: 0; padding-left: 18px; font-size: 0.82rem; color: var(--text-dim); }
 </style>

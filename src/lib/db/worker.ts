@@ -56,8 +56,12 @@ function registrarEdicion(sql: string) {
 
 async function init() {
 	const sqlite3 = await sqlite3InitModule();
-	const poolUtil = await sqlite3.installOpfsSAHPoolVfs({ name: 'rienda-pool' });
-	db = new poolUtil.OpfsSAHPoolDb('/rienda.sqlite3');
+	// Rienda + Sheets: la base vive en MEMORIA. La fuente de verdad es la Google
+	// Sheet "Finanzas": al abrir, sync.svelte.ts la baja y la carga acá; cada
+	// cambio se vuelve a escribir en la Sheet. Nada importante queda en el
+	// almacenamiento del navegador, así que si iOS lo borra no se pierde nada
+	// (y desaparecen los cuelgues por el lock exclusivo del pool OPFS).
+	db = new sqlite3.oo1.DB(':memory:', 'c');
 	db.exec(SCHEMA);
 
 	// Columna periodo en ingreso (agregada después del schema original)

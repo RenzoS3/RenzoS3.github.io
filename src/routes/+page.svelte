@@ -467,7 +467,8 @@
     // días, y del badge de notificaciones, que dispara a los 7): amarillo a los
     // 3 días sin copia, rojo a los 7. null (nunca exportó) se trata como rojo,
     // mismo criterio que ya usa /datos para "copiaVieja".
-    let diasCopia = $state<number | null>(null);
+    // Rienda + Sheets: la Sheet es el respaldo, no hace falta pedir copias.
+    let diasCopia = $state<number | null>(0);
     let compartiendoCopia = $state(false);
     const nivelAvisoCopia = $derived.by((): 'rojo' | 'amarillo' | null => {
         if (diasCopia === null) return 'rojo';
@@ -497,7 +498,7 @@
         }
     }
 
-    onMount(async () => { await resolverPeriodoInicial(); cargar(); cargarHaloIngreso(); cargarNombre(); cargarAvisoCopia(); });
+    onMount(async () => { await resolverPeriodoInicial(); cargar(); cargarHaloIngreso(); cargarNombre(); });
     // Alias locales al helper único de format.ts (mismo comportamiento de antes,
     // ya no reimplementado acá — ver Brief H / A1).
     const peso = pesos;

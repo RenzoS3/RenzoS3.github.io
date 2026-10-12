@@ -63,13 +63,11 @@ export async function cargarNotificaciones(): Promise<Notificaciones> {
 	}
 
 	// Regla 2 — Copia: más de 7 días desde la última exportación (Blindaje iOS).
-	const m = await leerMeta();
-	const ultExp = m.ultima_exportacion;
+	// Rienda + Sheets: apagada — los datos viven en la Sheet, no hay copia que hacer.
+	const ultExp = null as string | null;
 	if (ultExp) {
 		const d = diasEntre(ultExp, hoy);
 		if (d > 7) reglas.push({ tipo: 'copia', clave: 'copia', texto: `Hace ${d} días que no hacés una copia de seguridad.`, href: '/datos' });
-	} else if (!enPrimeraSemana) {
-		reglas.push({ tipo: 'copia', clave: 'copia', texto: 'Todavía no hiciste una copia de seguridad.', href: '/datos' });
 	}
 
 	// Regla 2b — Saltos de escala de precio (ver db/escala.ts): persistente hasta

@@ -20,6 +20,8 @@
 	import { ErrorValidacion } from '$lib/errores';
 	import { compartirOdescargarTexto } from '$lib/db/backup';
 	import DiagnosticoTecnico from '$lib/DiagnosticoTecnico.svelte';
+	import { sync, iniciar } from '$lib/sheets/sync.svelte';
+	import { parsearEnlace, guardarConexion, ping, borrarConexion } from '$lib/sheets/conexion';
 
 	onNavigate((navigation) => {
 		if (!document.startViewTransition) return;
@@ -136,10 +138,9 @@
 			perfilListo = await hayPerfil();
 			chequeando = false;
 			if (perfilListo) {
-				escribirMarcaPerfil(); // refresca ultimo_arranque_ok (Blindaje iOS)
-				autoCotizaciones(); autoPrecios(); // en segundo plano, no bloquea la app
-				autobackupDiarioSiHaceFalta(); // copia diaria si hace falta (Blindaje iOS, Brief 2), fire-and-forget
-				retomarFotosPendientes().catch((e) => console.error('[fotos] no se pudo retomar el recálculo:', e)); // marca fotos_pendientes_desde, fire-and-forget
+				// Rienda + Sheets: sin copias locales (la Sheet es el respaldo) y sin
+				// precios/fotos de inversiones hasta la fase 2. Queda el dólar/inflación.
+				autoCotizaciones(); // en segundo plano, no bloquea la app
 			}
 		} catch (e) {
 			// La consulta falló (worker colgado, timeout, etc.): NO sabemos si hay
@@ -174,8 +175,36 @@
 	// no debería tomar locks, no conviene competir por ella. El await
 	// secuencial de acá abajo es la garantía: no correrlos en paralelo.
 	async function iniciarArranque() {
-		await leerSenalesArranque();
+		// Rienda + Sheets: los datos vienen de la Google Sheet. Primero se bajan y
+		// se cargan en la base en memoria; recién ahí se chequea el perfil. Las
+		// señales de "el navegador borró la base" ya no aplican (no hay base local).
+		await iniciar();
+		if (sync.estado !== 'listo') { chequeando = false; return; }
 		await chequearPerfil();
+	}
+
+	// ===== Conexión con la Sheet (Rienda + Sheets) =====
+	let enlaceTexto = $state('');
+	let conectando = $state(false);
+	let conectarMsg = $state('');
+	async function onConectar() {
+		conectarMsg = '';
+		const c = parsearEnlace(enlaceTexto);
+		if (!c) { conectarMsg = 'Ese enlace no parece el del Apps Script (tiene que terminar en …/exec?k=…).'; return; }
+		conectando = true;
+		try {
+			await ping(c);
+			guardarConexion(c);
+			location.reload();
+		} catch (e: any) {
+			conectarMsg = e?.message ?? 'No se pudo conectar.';
+			conectando = false;
+		}
+	}
+	function onCambiarEnlace() {
+		if (!confirm('¿Desconectar esta app de la Sheet? Tus datos siguen en la Sheet; vas a tener que pegar el enlace de nuevo.')) return;
+		borrarConexion();
+		location.reload();
 	}
 
 	// Resync pesado (histórico completo de dólar + inflación, ArgentinaDatos) si
@@ -411,8 +440,28 @@
 	<div class="banner-fotos" role="status">Recalculando historial… {fotosProgreso.hecho}/{fotosProgreso.total}</div>
 {/if}
 
-{#if chequeando}
-	<div class="cargando-app"><p>Cargando…</p></div>
+{#if sync.estado === 'sin_conexion'}
+	<div class="bienvenida">
+		<div class="bcard">
+			<h2 class="bq">Conectá Rienda con tu Sheet</h2>
+			<p>Pegá el enlace de conexión que te dio el Apps Script de tu Sheet "Finanzas" (termina en <code>…/exec?k=…</code>). Se pide una sola vez en este teléfono.</p>
+			<input class="enlace" type="url" placeholder="https://script.google.com/macros/s/…/exec?k=…" bind:value={enlaceTexto} autocomplete="off" autocapitalize="off" spellcheck="false" />
+			<button class="crear" disabled={conectando || !enlaceTexto.trim()} onclick={onConectar}>{conectando ? 'Conectando…' : 'Conectar'}</button>
+			{#if conectarMsg}<p class="bmsg err"><span class="err-x">✗</span> {conectarMsg}</p>{/if}
+		</div>
+	</div>
+{:else if sync.estado === 'error_carga'}
+	<div class="bienvenida">
+		<div class="bcard">
+			<h2 class="bq">No pudimos bajar tus datos de la Sheet</h2>
+			<p>{sync.mensaje}</p>
+			<p>Tus datos no se tocaron: siguen en la Sheet.</p>
+			<button class="crear" onclick={() => location.reload()}>Reintentar</button>
+			<button class="bback" onclick={onCambiarEnlace}>Cambiar enlace de conexión</button>
+		</div>
+	</div>
+{:else if chequeando}
+	<div class="cargando-app"><p>{sync.estado === 'cargando' ? 'Bajando tus datos de la Sheet…' : 'Cargando…'}</p></div>
 {:else if perfilError}
 	<div class="bienvenida">
 		<div class="bcard">
@@ -550,11 +599,7 @@
 				<button class="item" class:activo={actual === '/configuracion'} onclick={() => irA('/configuracion')}>Configuración</button>
 			</div>
 
-			<div class="grupo">
-				<span class="gtit">Inversiones</span>
-				<button class="item" class:activo={actual === '/inversiones'} onclick={() => irA('/inversiones')}>Tenencia Actual</button>
-				<button class="item" class:activo={actual === '/evolucion'} onclick={() => irA('/evolucion')}>Evolución de cartera</button>
-			</div>
+			<!-- Rienda + Sheets: Inversiones queda para la fase 2 (Sheet "Inversiones"). -->
 
 			<div class="grupo">
 				<span class="gtit">Datos</span>
@@ -565,6 +610,21 @@
 				</button>
 			</div>
 		</aside>
+	{/if}
+
+	{#if sync.offline}
+		<div class="sync-aviso">Sin conexión con la Sheet: estás viendo la copia de este teléfono. Lo que cargues se guarda cuando vuelva la señal.</div>
+	{/if}
+	{#if sync.frenado}
+		<div class="sync-aviso rojo">{sync.frenado}</div>
+	{/if}
+	{#if sync.guardado === 'error' || (sync.guardado === 'pendiente' && sync.pendientes > 0)}
+		<div class="sync-aviso" class:rojo={sync.guardado === 'error'}>
+			{sync.guardado === 'error' ? 'No se pudo guardar en la Sheet: ' + sync.mensaje : 'Sin señal: ' + sync.pendientes + ' cambio(s) esperando para guardarse en la Sheet.'}
+		</div>
+	{/if}
+	{#if sync.avisos.length}
+		<a class="sync-aviso" href="/datos">{sync.avisos.length} fila(s) de la Sheet no se pudieron leer. Tocá para ver cuáles.</a>
 	{/if}
 
 	{@render children()}
@@ -792,6 +852,11 @@
 
 	/* ===== Barra superior ===== */
 	.marca-menu { font-family: var(--font-display); font-size: 1.6rem; font-weight: 700; color: var(--text); padding: 0 8px 4px; border-left: 3px solid var(--accent); padding-left: 12px; }
+	/* Rienda + Sheets */
+	.sync-aviso { display: block; margin: 0 auto 12px; max-width: 820px; padding: 9px 12px; border-radius: 8px; font-size: 0.85rem; background: var(--surface); border-left: 3px solid var(--warn); color: var(--text); text-decoration: none; }
+	.sync-aviso.rojo { border-left-color: var(--neg); }
+	.bcard input.enlace { width: 100%; box-sizing: border-box; padding: 10px; margin: 6px 0 12px; font: inherit; font-size: 0.9rem; }
+	.bcard code { font-size: 0.85em; }
 	/* Acciones fijas arriba a la derecha: menú + campana, apiladas y centradas entre sí. */
 	.topacc {
 		position: fixed; top: 35px; right: 16px; z-index: 10;

@@ -16,6 +16,7 @@
 import { queryBatch } from './client';
 import { setMeta } from './meta';
 import { hoyISO } from '../format';
+import { guardarMacro } from '../sheets/sync.svelte';
 
 const URL_DOLARAPI = 'https://dolarapi.com/v1/dolares';
 const URL_DOLARES = 'https://api.argentinadatos.com/v1/cotizaciones/dolares';
@@ -58,6 +59,7 @@ export async function actualizarDolar(): Promise<string> {
 
 	await queryBatch(stmts);
 	await setMeta('dolar_actualizado_en', new Date().toISOString());
+	await guardarMacro(); // Rienda + Sheets: queda en el teléfono para la próxima apertura
 
 	return `Dólar actualizado ✅ (${ok.join(', ')})`;
 }
@@ -132,6 +134,7 @@ export async function actualizarInflacionYHistorico(): Promise<string> {
 		throw new Error('Falló al guardar, no se modificó nada: ' + (e?.message ?? e));
 	}
 	await setMeta('cotizaciones_resync_en', new Date().toISOString());
+	await guardarMacro(); // Rienda + Sheets
 
 	const porCasa = CASAS.map((c) => `${c}: ${filtrados.filter((d) => d.casa === c).length}`).join(' · ');
 	return `Actualizado ✅ Dólar (${porCasa}) · Inflación: ${inflFiltrada.length} meses`;
