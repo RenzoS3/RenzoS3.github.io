@@ -10,7 +10,7 @@
 //  Seguridad: nunca sube una base vacía ni borrados masivos.
 
 import { query, queryBatch, onEscritura, onWorkerRoto, sinAvisar, estaRoto } from '../db/client';
-import { TABLAS, render, cargar, encabezado, formatos, type Render, type Fila, type Payload } from './tablas';
+import { TABLAS, render, cargar, encabezado, formatos, libroDe, invDisponible, type Render, type Fila, type Payload, type Tabla } from './tablas';
 import { leerConexion, tomarEnlaceDeLaUrl, bajar, subir, ErrorPuente, type Conexion, type CambiosHoja } from './conexion';
 import { SEED_MACRO } from '../db/seed_macro';
 
@@ -27,7 +27,16 @@ export const sync = $state({
 	pendientes: 0,
 	ultimaCarga: null as string | null,
 	ultimoGuardado: null as string | null,
-	hoja: null as { nombre: string; url: string } | null
+	hoja: null as { nombre: string; url: string } | null,
+	// Sheet "Inversiones" (fase 2). invEstado: 'ok' | 'script_viejo' (el Apps Script
+	// todavía no la conoce) | 'error' (no la encontró). Mientras no esté 'ok', lo de
+	// inversiones no se sube a ningún lado.
+	invEstado: 'ok' as 'ok' | 'script_viejo' | 'error',
+	invMensaje: '',
+	// La pestaña _activos no existía y la creó la app en esta apertura: todavía no
+	// hubo chance de cargar splits, así que no se reconstruye el historial.
+	catalogoNuevo: false,
+	hojaInv: null as { nombre: string; url: string } | null
 });
 
 const LS_PEND = 'rienda_sheets_pendiente';
@@ -41,8 +50,10 @@ type Cola = Map<string, Map<string, Op>>; // hoja -> clave -> op
 let pend: Cola = new Map();
 let enVuelo: Cola | null = null;
 let listo = false;
+let invOk = false; // se pueden guardar cambios en la Sheet Inversiones
 
 const TABLA_DE = new Map(TABLAS.map((t) => [t.hoja, t]));
+const sincroniza = (t: Tabla) => libroDe(t) === 'finanzas' || invOk;
 
 // ---------------------------------------------------------------------------
 // Persistencia local (cola y copia para abrir sin señal)
@@ -80,8 +91,14 @@ function restaurarCola() {
 }
 function guardarCopia(r: Render) {
 	const hojas: Payload['hojas'] = {};
-	for (const t of TABLAS) hojas[t.hoja] = { header: encabezado(t), filas: [...(r[t.hoja]?.values() ?? [])] };
-	try { localStorage.setItem(LS_COPIA, JSON.stringify({ ts: new Date().toISOString(), hojas })); } catch { /* lleno */ }
+	const inv: Payload['hojas'] = {};
+	for (const t of TABLAS) {
+		if (!sincroniza(t)) continue;
+		(libroDe(t) === 'inversiones' ? inv : hojas)[t.hoja] = { header: encabezado(t), filas: [...(r[t.hoja]?.values() ?? [])] };
+	}
+	const copia: Payload & { ts: string } = { ts: new Date().toISOString(), hojas };
+	if (invOk) copia.inv = { hojas: inv, nombre: sync.hojaInv?.nombre, url: sync.hojaInv?.url };
+	try { localStorage.setItem(LS_COPIA, JSON.stringify(copia)); } catch { /* lleno */ }
 }
 function leerCopia(): (Payload & { ts: string }) | null {
 	try { return JSON.parse(localStorage.getItem(LS_COPIA) ?? 'null'); } catch { return null; }
@@ -91,6 +108,7 @@ function leerCopia(): (Payload & { ts: string }) | null {
 // Detección de cambios
 // ---------------------------------------------------------------------------
 const MAX_BORRADOS = { principal: 10, otras: 30 }; // por cambio: más que esto, se frena
+const PRINCIPALES = new Set(['Gastos', 'Ingresos', 'Activos', 'Renta y amortización', 'Caja']);
 
 let detectando = false;
 let otraVez = false;
@@ -110,6 +128,7 @@ async function detectar() {
 		const actual = await render();
 		if (estaRoto()) return;
 		for (const t of TABLAS) {
+			if (!sincroniza(t)) continue;
 			const a = actual[t.hoja] ?? new Map();
 			const b = base[t.hoja] ?? new Map();
 			const ups: [string, Fila, boolean][] = [];
@@ -119,7 +138,7 @@ async function detectar() {
 				if (!prev || JSON.stringify(prev) !== JSON.stringify(fila)) ups.push([k, fila, !prev]);
 			}
 			for (const k of b.keys()) if (!a.has(k)) dels.push(k);
-			const tope = t.hoja === 'Gastos' || t.hoja === 'Ingresos' ? MAX_BORRADOS.principal : MAX_BORRADOS.otras;
+			const tope = PRINCIPALES.has(t.hoja) ? MAX_BORRADOS.principal : MAX_BORRADOS.otras;
 			const frenar = dels.length > tope;
 			if (frenar) {
 				sync.frenado = `Se frenó el borrado de ${dels.length} filas de "${t.hoja}" en la Sheet. Tus datos siguen ahí: recargá la app.`;
@@ -161,7 +180,7 @@ function armarCambios(c: Cola): CambiosHoja[] {
 	const out: CambiosHoja[] = [];
 	for (const [hoja, m] of c) {
 		const t = TABLA_DE.get(hoja)!;
-		const ch: CambiosHoja = { hoja, header: encabezado(t), clave: t.clave, formatos: formatos(t), upserts: [], deletes: [] };
+		const ch: CambiosHoja = { hoja, libro: libroDe(t), header: encabezado(t), clave: t.clave, formatos: formatos(t), upserts: [], deletes: [] };
 		for (const [k, op] of m) {
 			if (op.fila) ch.upserts.push({ clave: k, fila: op.fila, nuevo: op.nuevo });
 			else ch.deletes.push(k);
@@ -223,7 +242,9 @@ const HIJOS: Record<string, [string, string][]> = {
 	gasto: [['suscripcion_registro', 'gasto_id']],
 	ingreso: [['ingreso_fijo_registro', 'ingreso_id']],
 	suscripcion: [['suscripcion_registro', 'suscripcion_id']],
-	ingreso_fijo: [['ingreso_fijo_registro', 'ingreso_fijo_id']]
+	ingreso_fijo: [['ingreso_fijo_registro', 'ingreso_fijo_id']],
+	activo: [['transaccion', 'activo_id'], ['renta_activo', 'activo_id'], ['precio_historico', 'activo_id']],
+	cuenta_inversion: [['transaccion', 'cuenta_inversion_id']]
 };
 async function aplicarRemap(remap: Record<string, Record<string, string>>) {
 	const pares = Object.entries(remap).flatMap(([h, m]) => Object.entries(m).map(([a, b]) => [h, a, b] as const));
@@ -362,6 +383,7 @@ export async function iniciar(): Promise<void> {
 		try {
 			payload = await bajar(conexion);
 			sync.hoja = (payload as any).hoja ?? null;
+			sync.hojaInv = payload.inv?.url ? { nombre: payload.inv.nombre ?? 'Inversiones', url: payload.inv.url } : null;
 			try { localStorage.setItem('rienda_sheets_hoja', JSON.stringify(sync.hoja)); } catch { /* ignore */ }
 			sync.offline = false;
 			sync.ultimaCarga = new Date().toISOString();
@@ -380,13 +402,18 @@ export async function iniciar(): Promise<void> {
 		}
 		payload = copia;
 		try { sync.hoja = JSON.parse(localStorage.getItem('rienda_sheets_hoja') ?? 'null'); } catch { /* ignore */ }
+		sync.hojaInv = copia.inv?.url ? { nombre: copia.inv.nombre ?? 'Inversiones', url: copia.inv.url } : null;
 		sync.offline = true;
 		sync.ultimaCarga = copia.ts;
 	}
 
 	// 3) Cargar en la base.
+	invOk = invDisponible(payload);
+	sync.invEstado = invOk ? 'ok' : payload.inv?.error ? 'error' : 'script_viejo';
+	sync.invMensaje = payload.inv?.error ?? '';
 	const res = await sinAvisar(() => cargar(payload!));
 	sync.avisos = res.avisos;
+	sync.catalogoNuevo = invOk && !res.hojasPresentes.has('_activos');
 	base = await render();
 	for (const [hoja, claves] of Object.entries(res.creadas)) for (const k of claves) base[hoja]?.delete(k);
 	// Sin señal, la copia ya incluye lo pendiente; la cola se sube igual cuando

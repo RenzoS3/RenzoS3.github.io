@@ -105,6 +105,7 @@ export async function bajar(c: Conexion): Promise<Payload & { ts: string }> {
 
 export type CambiosHoja = {
 	hoja: string;
+	libro: 'finanzas' | 'inversiones';
 	header: string[];
 	clave: string;
 	formatos: Record<string, string>;

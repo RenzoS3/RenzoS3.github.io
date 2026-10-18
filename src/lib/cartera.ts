@@ -206,12 +206,16 @@ export async function fechaCorteRearquitectura(): Promise<string | null> {
 // tiene NINGÚN precio conocido en o antes de esa fecha, se usa su PPC de ese
 // momento como último recurso — mismo criterio que calcularFoto hoy), liquidez
 // vía el ledger cortado a esa fecha, y MEP de esa fecha (o el último anterior).
+// Rienda + Sheets: mientras se reconstruyen cientos de fotos seguidas, la serie
+// del dólar se lee una sola vez (no cambia en el medio).
+let serieDolarFija: Awaited<ReturnType<typeof cargarDolarSerie>> | null = null;
+
 export async function calcularValuacionEnFecha(fecha: string): Promise<{
 	dolar: number;
 	valorUSD: number;
 	valorARS: number;
 }> {
-	const serieDolar = await cargarDolarSerie();
+	const serieDolar = serieDolarFija ?? (await cargarDolarSerie());
 	const dolar = dolarDeFecha(serieDolar, fecha) ?? (await dolarActual());
 
 	const { lotes, aMap } = await calcularFIFO(fecha);
@@ -240,7 +244,7 @@ export async function calcularValuacionEnFecha(fecha: string): Promise<{
 // compartida entre invalidarFotosDesde, completarFotosFaltantes y la
 // reparación única (repararFotosPPC) — así las tres calculan flujo_usd
 // exactamente igual, en vez de reimplementar la ventana cada vez.
-async function recalcularYGuardarFoto(fecha: string): Promise<void> {
+export async function recalcularYGuardarFoto(fecha: string): Promise<void> {
 	const v = await calcularValuacionEnFecha(fecha);
 
 	const anterior = (await query(
@@ -367,6 +371,50 @@ export async function completarFotosFaltantes(hastaExcluyendo: string): Promise<
 		cursor.setDate(cursor.getDate() + 1);
 	}
 	return n;
+}
+
+// Rienda + Sheets — reconstrucción del historial: completa una foto por día
+// desde el primer movimiento hasta la foto más vieja que ya exista (o hasta
+// `hasta`, inclusive, si todavía no hay ninguna). Es lo que la app habría
+// guardado si se hubiera usado todos los días desde entonces: misma valuación
+// que el recálculo (calcularValuacionEnFecha). Idempotente: si la serie ya
+// arranca en el primer movimiento, no hace nada. Devuelve cuántas fotos armó.
+let reconstruyendo = false;
+export async function reconstruirFotosDesdeInicio(hasta: string): Promise<number> {
+	if (reconstruyendo) return 0;
+	const primer = await fechaPrimerMovimiento();
+	if (!primer) return 0;
+	const r = (await query('SELECT MIN(fecha) AS f FROM snapshot WHERE perfil_id=1')) as any[];
+	const minFoto: string | null = r[0]?.f ?? null;
+	if (minFoto && minFoto <= primer) return 0;
+	const fin = minFoto ?? hasta;
+	const dias: string[] = [];
+	const cursor = new Date(primer + 'T00:00:00');
+	for (;;) {
+		const f = fechaISO(cursor);
+		if (minFoto ? f >= fin : f > fin) break;
+		dias.push(f);
+		cursor.setDate(cursor.getDate() + 1);
+	}
+	if (!dias.length) return 0;
+	reconstruyendo = true;
+	fotosProgreso.iniciar(dias.length);
+	try {
+		serieDolarFija = await cargarDolarSerie();
+		for (let i = 0; i < dias.length; i++) {
+			await recalcularYGuardarFoto(dias[i]);
+			fotosProgreso.avanzar();
+			if ((i + 1) % LOTE_FOTOS === 0) await new Promise((res) => setTimeout(res, 0));
+		}
+		// La foto que ya existía calculó su flujo contra "nada antes": ahora tiene
+		// una foto el día anterior, así que se recalcula con la ventana correcta.
+		if (minFoto) await recalcularYGuardarFoto(minFoto);
+	} finally {
+		serieDolarFija = null;
+		fotosProgreso.terminar();
+		reconstruyendo = false;
+	}
+	return dias.length;
 }
 
 // Primera fecha con un movimiento REAL en la cuenta (transacción, movimiento

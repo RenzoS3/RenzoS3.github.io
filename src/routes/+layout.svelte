@@ -21,6 +21,7 @@
 	import { compartirOdescargarTexto } from '$lib/db/backup';
 	import DiagnosticoTecnico from '$lib/DiagnosticoTecnico.svelte';
 	import { sync, iniciar, guardarAhora } from '$lib/sheets/sync.svelte';
+	import { arrancarInversiones } from '$lib/sheets/mercado';
 	import { parsearEnlace, guardarConexion, ping, borrarConexion } from '$lib/sheets/conexion';
 
 	onNavigate((navigation) => {
@@ -138,9 +139,10 @@
 			perfilListo = await hayPerfil();
 			chequeando = false;
 			if (perfilListo) {
-				// Rienda + Sheets: sin copias locales (la Sheet es el respaldo) y sin
-				// precios/fotos de inversiones hasta la fase 2. Queda el dólar/inflación.
-				autoCotizaciones(); // en segundo plano, no bloquea la app
+				// Rienda + Sheets: sin copias locales (la Sheet es el respaldo).
+				const cotiz = autoCotizaciones(); // en segundo plano, no bloquea la app
+				// Inversiones (Sheet "Inversiones"): precios, histórico y fotos, en segundo plano.
+				if (sync.invEstado === 'ok') arrancarInversiones(autoPrecios, cotiz, { reconstruir: !sync.catalogoNuevo });
 			}
 		} catch (e) {
 			// La consulta falló (worker colgado, timeout, etc.): NO sabemos si hay
@@ -333,6 +335,8 @@
 	}
 
 	let actual = $derived($page.url.pathname);
+	const RUTAS_INV = ['/inversiones', '/evolucion', '/carga-inversiones', '/config-tickers', '/mercado'];
+	let enInversiones = $derived(RUTAS_INV.some((r) => actual === r || actual.startsWith(r + '/')));
 	// evolucion-finanzas comparte pathname entre Gastos e Ingresos (se distinguen por
 	// ?tab): sin esto, "Evolución de Gastos" quedaba marcado activo aunque estuvieras
 	// en Ingresos (o en sus hijos poder/categorias/capacidad), y "Evolución de Ingresos"
@@ -601,7 +605,11 @@
 				<button class="item" class:activo={actual === '/configuracion'} onclick={() => irA('/configuracion')}>Configuración</button>
 			</div>
 
-			<!-- Rienda + Sheets: Inversiones queda para la fase 2 (Sheet "Inversiones"). -->
+			<div class="grupo">
+				<span class="gtit">Inversiones</span>
+				<button class="item" class:activo={actual === '/inversiones'} onclick={() => irA('/inversiones')}>Tenencia Actual</button>
+				<button class="item" class:activo={actual === '/evolucion'} onclick={() => irA('/evolucion')}>Evolución de cartera</button>
+			</div>
 
 			<div class="grupo">
 				<span class="gtit">Datos</span>
@@ -627,6 +635,13 @@
 	{/if}
 	{#if sync.avisos.length}
 		<a class="sync-aviso" href="/datos">{sync.avisos.length} fila(s) de la Sheet no se pudieron leer. Tocá para ver cuáles.</a>
+	{/if}
+	{#if enInversiones && sync.invEstado !== 'ok'}
+		<a class="sync-aviso rojo" href="/datos">
+			{sync.invEstado === 'script_viejo'
+				? 'Inversiones todavía no está conectada con tu Sheet "Inversiones": falta actualizar el Apps Script. Lo que cargues acá no se guarda. Tocá para ver cómo.'
+				: 'No se pudo abrir la Sheet "Inversiones": ' + sync.invMensaje + ' Lo que cargues acá no se guarda.'}
+		</a>
 	{/if}
 
 	{@render children()}

@@ -20,6 +20,7 @@ import { controlarEscala } from './escala';
 import { calcularFoto, guardarSnapshot, completarFotosFaltantes } from '../cartera';
 import { actualizarDolar } from './cotizaciones';
 import { ErrorValidacion, ErrorRed } from '../errores';
+import { guardarMercado } from '../sheets/cacheMercado';
 
 const PANELES = ['arg_bonds', 'arg_corp', 'arg_cedears', 'arg_stocks', 'arg_notes'];
 
@@ -424,5 +425,7 @@ export async function actualizarPreciosYFoto(): Promise<string> {
 		// automática es un efecto secundario, no la operación principal.
 		console.error('[precios] no se pudo guardar la foto automática de cartera:', e);
 	}
+	// Rienda + Sheets: los cierres del día quedan también en la copia del teléfono.
+	guardarMercado().catch(() => {});
 	return mensaje;
 }

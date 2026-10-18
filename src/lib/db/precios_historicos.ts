@@ -30,6 +30,7 @@ import { BASE, ajustarEscala } from './data912';
 import { invalidarFotosDesde } from '../cartera';
 import { cargarDolarSerie, dolarDeFecha } from '../moneda';
 import { controlarEscala, ultimoPrecioConocido } from './escala';
+import { parsearSplits, ajustarSerie } from './splits';
 
 // Umbral del backfill de activos USD: si el último cierre de la serie bajada
 // supera en más de 200x al precio de referencia del activo, la serie viene en
@@ -94,6 +95,17 @@ export async function descargarSerieData912(simbolo: string, tipo: string): Prom
 		const p: PuntoHistorico = { fecha, precio: ajustarEscala(c, tipo) };
 		if (Number.isFinite(v) && v >= 0) p.volumen = v;
 		out.push(p);
+	}
+	// Rienda + Sheets: splits / cambios de ratio cargados en _activos (ver splits.ts).
+	try {
+		const r = (await query(
+			"SELECT splits FROM activo WHERE perfil_id=1 AND splits IS NOT NULL AND TRIM(splits) <> '' AND (UPPER(simbolo_cotizacion)=UPPER(?) OR UPPER(ticker)=UPPER(?)) LIMIT 1",
+			[simbolo, simbolo]
+		)) as any[];
+		const splits = parsearSplits(r[0]?.splits);
+		if (splits.length) return ajustarSerie(out, splits);
+	} catch {
+		/* sin splits: la serie va tal cual */
 	}
 	return out;
 }
@@ -172,7 +184,9 @@ export async function registrarPrecioTransaccion(activoId: number, fecha: string
 // alta con símbolo, o desde un refresco manual). Trae toda la serie disponible
 // y la upsertea en lote. Devuelve cuántos puntos se guardaron, o null si el
 // activo no tiene endpoint histórico (ON, FCI) o no hay símbolo configurado.
-export async function backfillHistoricoActivo(activoId: number): Promise<number | null> {
+// invalidar=false (Rienda + Sheets): completar el histórico en un teléfono que no
+// lo tenía guardado no cambia ninguna foto ya calculada en la Sheet.
+export async function backfillHistoricoActivo(activoId: number, invalidar = true): Promise<number | null> {
 	const rows = (await query(
 		'SELECT tipo, simbolo_cotizacion, moneda FROM activo WHERE id=? AND perfil_id=1',
 		[activoId]
@@ -221,7 +235,7 @@ export async function backfillHistoricoActivo(activoId: number): Promise<number 
 	// siempre (de ahí la migración única de reparación, ver repararFotosPPC en
 	// cartera.ts). Best-effort: no bloquea el backfill si falla.
 	const fechaMin = serie.reduce((min, p) => (p.fecha < min ? p.fecha : min), serie[0].fecha);
-	invalidarFotosDesde(fechaMin).catch(() => {});
+	if (invalidar) invalidarFotosDesde(fechaMin).catch(() => {});
 
 	return serie.length;
 }

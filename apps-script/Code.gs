@@ -1,5 +1,5 @@
 /**
- * Rienda + Sheets — puente entre la app Rienda y esta Google Sheet.
+ * Rienda + Sheets — puente entre la app Rienda y tus Google Sheets.
  *
  * Se pega UNA vez en la Sheet "Finanzas" (Extensiones → Apps Script) y se
  * implementa como App web. La app lo llama para:
@@ -7,7 +7,10 @@
  *   - load:  bajar todas las pestañas (y ponerle id a las filas que no tengan).
  *   - push:  subir cambios fila por fila (por id): altas, ediciones y bajas.
  *
- * No toca nada fuera de esta Sheet y no manda datos a ningún otro lado.
+ * Trabaja sobre dos Sheets: "Finanzas" (donde vive el script) e "Inversiones"
+ * (la del ID_INVERSIONES de abajo). No toca nada más y no manda datos a ningún
+ * otro lado. Las columnas que la app no usa (fórmulas como monto_ars) quedan
+ * como están, y las filas nuevas copian la fórmula de la fila de arriba.
  * Pasos de instalación: ver apps-script/LEEME.md en el repo.
  */
 
@@ -15,9 +18,13 @@
 // Pegá entre las comillas la "URL de la aplicación web" que te da Implementar
 // (termina en /exec). Hace falta para que configurar() arme el link del iPhone.
 const URL_WEBAPP = '';
+// ID de la Sheet "Inversiones": es lo que va entre /d/ y /edit en su dirección.
+const ID_INVERSIONES = '';
+const VERSION = 2;
 const APP_URL = 'https://renzos3.github.io/'; // URL de la app (GitHub Pages)
 const MAX_BORRADOS = 30;       // borrados por pestaña en un solo envío: más que esto se frena
 const COLS_TEXTO = { Gastos: ['fecha', 'mes_inicio_pago'], Ingresos: ['fecha', 'periodo'] };
+const COLS_TEXTO_INV = { Activos: ['fecha'], 'Renta y amortización': ['fecha'], Caja: ['fecha'] };
 const COLS_MES = ['mes_inicio_pago', 'periodo'];
 
 // ---- Entrada web --------------------------------------------------------------
@@ -48,7 +55,7 @@ function manejar_(p, body) {
   if (!clave) throw new Error('Falta correr configurar() en el editor de Apps Script.');
   if (String(p.k || '') !== clave) throw new Error('Clave incorrecta: revisá el enlace de conexión.');
   const ss = libro_();
-  if (p.op === 'ping') return { ok: true, hoja: ss.getName() };
+  if (p.op === 'ping') return { ok: true, hoja: ss.getName(), version: VERSION };
   if (p.op === 'load') return cargar_(ss, String(p.ids || '').split(',').filter(String));
   if (p.op === 'push') return subir_(ss, (body && body.cambios) || [], !!(body && body.forzar));
   throw new Error('Operación desconocida: ' + p.op);
@@ -57,6 +64,17 @@ function manejar_(p, body) {
 function libro_() {
   const id = PropertiesService.getScriptProperties().getProperty('RIENDA_SHEET_ID');
   return id ? SpreadsheetApp.openById(id) : SpreadsheetApp.getActive();
+}
+
+// La Sheet "Inversiones". Tira un error claro si falta el ID o no se puede abrir.
+function libroInv_() {
+  const id = String(ID_INVERSIONES || '').trim();
+  if (!id) throw new Error('Falta pegar el ID de la Sheet Inversiones en ID_INVERSIONES (arriba de todo del script).');
+  try {
+    return SpreadsheetApp.openById(id);
+  } catch (err) {
+    throw new Error('No se pudo abrir la Sheet Inversiones con ese ID: ' + String((err && err.message) || err));
+  }
 }
 
 function conLock_(fn) {
@@ -72,38 +90,58 @@ function conLock_(fn) {
 // ---- Bajar ---------------------------------------------------------------------
 function cargar_(ss, conId) {
   return conLock_(function () {
-    const tz = ss.getSpreadsheetTimeZone();
-    const hojas = {};
-    ss.getSheets().forEach(function (sh) {
-      const nombre = sh.getName();
-      const lastRow = sh.getLastRow();
-      const lastCol = sh.getLastColumn();
-      if (lastRow < 1 || lastCol < 1) {
-        hojas[nombre] = { header: [], filas: [] };
-        return;
-      }
-      const vals = sh.getRange(1, 1, lastRow, lastCol).getValues();
-      const header = vals[0].map(function (h) { return String(h).trim(); });
-      let ci = header.indexOf('id');
-      if (ci < 0 && conId.indexOf(nombre) >= 0 && header.some(String)) {
-        ci = header.length;
-        sh.getRange(1, ci + 1).setValue('id').setFontWeight('bold');
-        header.push('id');
-        vals.forEach(function (r, i) { r.push(i === 0 ? 'id' : ''); });
-      }
-      if (ci >= 0) asignarIds_(sh, vals, ci);
-      const filas = vals.slice(1).map(function (r) {
-        return r.map(function (v, j) { return celda_(v, header[j], tz); });
-      });
-      hojas[nombre] = { header: header, filas: filas };
-    });
-    return { ok: true, ts: new Date().toISOString(), hoja: { nombre: ss.getName(), url: ss.getUrl() }, hojas: hojas };
+    const out = { ok: true, version: VERSION, ts: new Date().toISOString(), hoja: { nombre: ss.getName(), url: ss.getUrl() }, hojas: leerLibro_(ss, conId) };
+    try {
+      const inv = libroInv_();
+      out.inv = { nombre: inv.getName(), url: inv.getUrl(), hojas: leerLibro_(inv, conId) };
+    } catch (err) {
+      out.inv = { error: String((err && err.message) || err) };
+    }
+    return out;
   });
+}
+
+function leerLibro_(ss, conId) {
+  const tz = ss.getSpreadsheetTimeZone();
+  const hojas = {};
+  ss.getSheets().forEach(function (sh) {
+    const nombre = sh.getName();
+    const lastRow = sh.getLastRow();
+    const lastCol = sh.getLastColumn();
+    if (lastRow < 1 || lastCol < 1) {
+      hojas[nombre] = { header: [], filas: [] };
+      return;
+    }
+    const rango = sh.getRange(1, 1, lastRow, lastCol);
+    const vals = rango.getValues();
+    const header = vals[0].map(function (h) { return String(h).trim(); });
+    const conIdAca = conId.indexOf(nombre) >= 0;
+    // Una fila que solo tiene fórmulas (por ejemplo, la fórmula arrastrada hacia
+    // abajo en filas vacías) cuenta como vacía: no lleva id y la app la saltea.
+    const forms = conIdAca ? rango.getFormulas() : null;
+    const soloFormulas = vals.map(function (r, i) {
+      return !!forms && i > 0 && r.every(function (v, j) { return v === '' || v === null || !!forms[i][j] || header[j] === 'id'; });
+    });
+    let ci = header.indexOf('id');
+    if (ci < 0 && conIdAca && header.some(String)) {
+      ci = header.length;
+      sh.getRange(1, ci + 1).setValue('id').setFontWeight('bold');
+      header.push('id');
+      vals.forEach(function (r, i) { r.push(i === 0 ? 'id' : ''); });
+    }
+    if (ci >= 0) asignarIds_(sh, vals, ci, soloFormulas);
+    const filas = vals.slice(1).map(function (r, i) {
+      if (soloFormulas[i + 1]) return r.map(function () { return ''; });
+      return r.map(function (v, j) { return celda_(v, header[j], tz); });
+    });
+    hojas[nombre] = { header: header, filas: filas };
+  });
+  return hojas;
 }
 
 // Pone id a las filas que no tienen (o lo tienen repetido): siempre más grande
 // que todos los existentes, así nunca choca con uno que ya use la app.
-function asignarIds_(sh, vals, ci) {
+function asignarIds_(sh, vals, ci, soloFormulas) {
   let max = 0;
   for (let i = 1; i < vals.length; i++) {
     const n = Number(vals[i][ci]);
@@ -113,7 +151,7 @@ function asignarIds_(sh, vals, ci) {
   let cambio = false;
   for (let i = 1; i < vals.length; i++) {
     const fila = vals[i];
-    const vacia = fila.every(function (v, j) { return j === ci || v === '' || v === null; });
+    const vacia = (soloFormulas && soloFormulas[i]) || fila.every(function (v, j) { return j === ci || v === '' || v === null; });
     if (vacia) continue;
     let n = Number(fila[ci]);
     if (!(n > 0) || vistos[n]) {
@@ -143,8 +181,11 @@ function subir_(ss, cambios, forzar) {
         throw new Error('Se frenó: ' + ch.deletes.length + ' borrados en "' + ch.hoja + '" de una sola vez.');
     });
     const remap = {};
+    let inv = null;
     cambios.forEach(function (ch) {
-      const r = subirHoja_(ss, ch);
+      let libro = ss;
+      if (ch.libro === 'inversiones') libro = inv || (inv = libroInv_());
+      const r = subirHoja_(libro, ch);
       if (Object.keys(r).length) remap[ch.hoja] = r;
     });
     SpreadsheetApp.flush();
@@ -175,9 +216,24 @@ function subirHoja_(ss, ch) {
   const col = {};
   header.forEach(function (h, i) { col[h] = i; });
   const ck = col[ch.clave];
+  // Columnas que la app no maneja (fórmulas propias, notas, etc.): no se pisan.
+  const propias = header.map(function (h, i) { return ch.header.indexOf(h) < 0 ? i : -1; }).filter(function (i) { return i >= 0; });
 
   const lastRow = sh.getLastRow();
   const vals = lastRow >= 2 ? sh.getRange(2, 1, lastRow - 1, ancho).getValues() : [];
+  // En esas columnas, si la celda tiene fórmula se reescribe la fórmula (no su valor).
+  if (vals.length && propias.length) {
+    const forms = sh.getRange(2, 1, lastRow - 1, ancho).getFormulas();
+    vals.forEach(function (r, i) {
+      propias.forEach(function (j) { if (forms[i][j]) r[j] = forms[i][j]; });
+    });
+  }
+  // Fórmulas de la última fila (en notación relativa) para copiarlas a las filas nuevas.
+  const formsNuevas = {};
+  if (vals.length && propias.length) {
+    const ult = sh.getRange(lastRow, 1, 1, ancho).getFormulasR1C1()[0];
+    propias.forEach(function (j) { if (ult[j]) formsNuevas[j] = ult[j]; });
+  }
   const filaDe = {};
   let max = 0;
   vals.forEach(function (r, i) {
@@ -229,6 +285,9 @@ function subirHoja_(ss, ch) {
     if (faltan > 0) sh.insertRowsAfter(sh.getMaxRows(), faltan);
     aplicarFormatos_(sh, ch, desde, nuevas.length, col);
     sh.getRange(desde, 1, nuevas.length, ancho).setValues(nuevas);
+    Object.keys(formsNuevas).forEach(function (j) {
+      sh.getRange(desde, Number(j) + 1, nuevas.length, 1).setFormulaR1C1(formsNuevas[j]);
+    });
   }
   // Bajas: de abajo hacia arriba para que no se corran los índices.
   (ch.deletes || [])
@@ -260,6 +319,13 @@ function configurar() {
   }
   // Fechas y meses como texto (si no, Sheets los convierte solo en fechas).
   Object.keys(COLS_TEXTO).forEach(function (nombre) { prepararTexto_(ss, nombre, COLS_TEXTO[nombre]); });
+  if (String(ID_INVERSIONES || '').trim()) {
+    const inv = libroInv_();
+    Object.keys(COLS_TEXTO_INV).forEach(function (nombre) { prepararTexto_(inv, nombre, COLS_TEXTO_INV[nombre]); });
+    Logger.log('Sheet Inversiones conectada: ' + inv.getName());
+  } else {
+    Logger.log('Ojo: falta el ID de la Sheet Inversiones (ID_INVERSIONES). Sin eso, la app no muestra inversiones.');
+  }
   // El nombre y el tipo de período los pregunta la app la primera vez que se abre.
   // La URL buena es la de la implementación (/exec). Desde el editor Google a veces
   // devuelve la de prueba (/dev), que no sirve para el teléfono.

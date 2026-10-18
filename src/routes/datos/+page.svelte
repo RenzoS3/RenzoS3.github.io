@@ -4,7 +4,7 @@
 	// fuente de verdad y el respaldo a la vez.
 	import { sync, recargarDesdeSheet } from '$lib/sheets/sync.svelte';
 	import { borrarConexion } from '$lib/sheets/conexion';
-	import { descargarBlob, exportarFinanzasXLSX } from '$lib/db/precarga';
+	import { descargarBlob, exportarFinanzasXLSX, exportarInversionesXLSX } from '$lib/db/precarga';
 	import { hoyISO, fechaHoraCorta } from '$lib/format';
 	import Guia from '$lib/Guia.svelte';
 	import InstalarApp from '$lib/InstalarApp.svelte';
@@ -25,6 +25,15 @@
 	async function onExcel() {
 		try {
 			descargarBlob(`rienda-finanzas-${hoyISO()}.xlsx`, await exportarFinanzasXLSX());
+		} catch (e) {
+			console.error(e);
+			alert('No se pudo generar el Excel.');
+		}
+	}
+
+	async function onExcelInv() {
+		try {
+			descargarBlob(`rienda-inversiones-${hoyISO()}.xlsx`, await exportarInversionesXLSX());
 		} catch (e) {
 			console.error(e);
 			alert('No se pudo generar el Excel.');
@@ -61,7 +70,7 @@
 <div class="estado" class:vieja={sync.guardado === 'error' || sync.offline}>
 	<span class="est-main">{estadoTexto}</span>
 	<span class="est-sub">
-		{#if sync.hoja}Sheet: <a href={sync.hoja.url} target="_blank" rel="noopener">{sync.hoja.nombre}</a> · {/if}
+		{#if sync.hoja}Sheet: <a href={sync.hoja.url} target="_blank" rel="noopener">{sync.hoja.nombre}</a>{#if sync.hojaInv} y <a href={sync.hojaInv.url} target="_blank" rel="noopener">{sync.hojaInv.nombre}</a>{/if} · {/if}
 		Bajada {fechaHoraCorta(sync.ultimaCarga, '—')}{#if sync.ultimoGuardado} · último guardado {fechaHoraCorta(sync.ultimoGuardado)}{/if}
 	</span>
 	{#if sync.offline}<span class="est-sub">Sin conexión: estás viendo la copia de este teléfono.</span>{/if}
@@ -71,7 +80,24 @@
 <div class="acc">
 	<button class="btn btn-primary" disabled={recargando} onclick={onRecargar}>{recargando ? 'Recargando…' : 'Recargar desde la Sheet'}</button>
 	<button class="btn btn-secondary" onclick={onExcel}>Descargar Excel (formato RIENDA)</button>
+	{#if sync.invEstado === 'ok'}<button class="btn btn-secondary" onclick={onExcelInv}>Descargar Excel de inversiones</button>{/if}
 </div>
+
+{#if sync.invEstado !== 'ok'}
+	<details class="sec" open>
+		<summary>Conectar la Sheet "Inversiones"</summary>
+		<div class="sec-body">
+			{#if sync.invEstado === 'error'}<p class="nota aviso">{sync.invMensaje}</p>{/if}
+			<p class="nota">Desde la compu, en la Sheet <b>Finanzas</b> → Extensiones → Apps Script:</p>
+			<ol class="pasos">
+				<li>Reemplazá todo el código por la versión nueva de <code>apps-script/Code.gs</code> del repo.</li>
+				<li>Arriba de todo, pegá entre las comillas de <code>ID_INVERSIONES</code> el ID de tu Sheet Inversiones (lo que va entre <code>/d/</code> y <code>/edit</code> en su dirección). Guardá.</li>
+				<li>Implementar → Gestionar implementaciones → ✏ → Versión: <b>Nueva</b> → Implementar. La dirección no cambia: el teléfono no hay que reconectarlo.</li>
+				<li>Volvé acá y tocá <b>Recargar desde la Sheet</b>.</li>
+			</ol>
+		</div>
+	</details>
+{/if}
 {#if msg}<p class="nota aviso">{msg}</p>{/if}
 
 {#if sync.avisos.length}
@@ -117,4 +143,5 @@
 	.nota { font-size: 0.82rem; color: var(--text-dim); margin: 0; line-height: 1.5; }
 	.aviso { margin-top: 10px; color: var(--warn); }
 	ul.avisos { margin: 0; padding-left: 18px; font-size: 0.82rem; color: var(--text-dim); }
+	ol.pasos { margin: 0; padding-left: 20px; font-size: 0.85rem; line-height: 1.55; display: flex; flex-direction: column; gap: 4px; }
 </style>

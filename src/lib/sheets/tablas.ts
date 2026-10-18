@@ -11,6 +11,10 @@
 // filas tal como van en la Sheet; cargar() hace lo inverso.
 
 import { query, queryBatch } from '../db/client';
+import {
+	renderActivos, renderRenta, renderCaja, renderCatalogo, renderCuentas, renderPrecios, renderFotos,
+	prepararInversiones, hayDatosInversiones, type DatosInv
+} from './inversiones';
 
 export type Valor = string | number | null;
 type Ref = 'categoria' | 'subcategoria' | 'tarjeta';
@@ -24,13 +28,18 @@ type Col = {
 	formato?: string; // formato de celda en la Sheet ('@' = texto)
 };
 
+export type Libro = 'finanzas' | 'inversiones';
 export type Tabla = {
 	tabla: string; // tabla SQLite
-	hoja: string; // pestaña de la Sheet
-	clave: 'id' | 'clave';
+	hoja: string; // pestaña de la Sheet (nombres únicos entre los dos libros)
+	clave: string; // columna que identifica la fila ('id', 'clave', 'fecha')
 	cols: Col[];
 	perfil: boolean; // la tabla tiene perfil_id
+	libro?: Libro; // default: Finanzas
+	// Inversiones: render propio (join con activo / cuenta) y carga en inversiones.ts.
+	propio?: () => Promise<Map<string, Fila>>;
 };
+export const libroDe = (t: Tabla): Libro => t.libro ?? 'finanzas';
 
 const T = (hoja: string, f?: string): Col => ({ hoja, tipo: 'texto', formato: f });
 const N = (hoja: string, f?: string): Col => ({ hoja, tipo: 'num', formato: f });
@@ -38,6 +47,7 @@ const I = (hoja: string): Col => ({ hoja, tipo: 'int' });
 const R = (hoja: string, sql: string, ref: Ref): Col => ({ hoja, sql, tipo: 'texto', ref });
 const ID = I('id');
 const MONTO = N('monto', '#,##0.00');
+const INV = 'inversiones' as const;
 
 // Orden = orden de carga (padres antes que hijas, por las foreign keys).
 export const TABLAS: Tabla[] = [
@@ -71,15 +81,49 @@ export const TABLAS: Tabla[] = [
 	{ tabla: 'presupuesto', hoja: '_presupuestos', clave: 'id', perfil: true, cols: [ID, R('subcategoria', 'subcategoria_id', 'subcategoria'), T('periodo', '@'), MONTO, I('auto')] },
 	{ tabla: 'reserva_credito', hoja: '_reserva_credito', clave: 'id', perfil: true, cols: [ID, T('periodo', '@'), MONTO] },
 	{ tabla: 'meta', hoja: '_ajustes', clave: 'clave', perfil: false, cols: [T('clave', '@'), T('valor', '@')] },
-	{ tabla: 'notif_visto', hoja: '_notif_visto', clave: 'id', perfil: true, cols: [ID, T('tipo'), I('ref_id'), T('periodo', '@')] }
+	{ tabla: 'notif_visto', hoja: '_notif_visto', clave: 'id', perfil: true, cols: [ID, T('tipo'), I('ref_id'), T('periodo', '@')] },
+
+	// ----- Sheet "Inversiones" (fase 2) — ver inversiones.ts -----
+	{
+		tabla: 'cuenta_inversion', hoja: '_cuentas', clave: 'id', perfil: true, libro: INV, propio: renderCuentas,
+		cols: [ID, T('nombre'), T('tipo'), I('activa')]
+	},
+	{
+		tabla: 'activo', hoja: '_activos', clave: 'id', perfil: true, libro: INV, propio: renderCatalogo,
+		cols: [ID, T('ticker'), T('nombre'), T('tipo'), T('renta'), T('moneda'), T('exposicion'), T('simbolo_cotizacion'), T('splits', '@'), I('activo'), N('precio_actual'), T('precio_actualizado_en', '@')]
+	},
+	{
+		tabla: 'transaccion', hoja: 'Activos', clave: 'id', perfil: true, libro: INV, propio: renderActivos,
+		cols: [T('fecha', '@'), T('operacion'), T('ticker'), T('nombre'), T('tipo'), T('renta'), T('moneda'), T('cuenta'), N('unidades'), N('monto_total'), N('valor_dolar'), ID]
+	},
+	{
+		tabla: 'renta_activo', hoja: 'Renta y amortización', clave: 'id', perfil: true, libro: INV, propio: renderRenta,
+		cols: [T('fecha', '@'), T('ticker'), T('nombre'), T('tipo'), T('renta'), T('moneda'), N('monto_renta'), N('monto_amort'), N('valor_dolar'), ID]
+	},
+	{
+		tabla: 'mov_caja', hoja: 'Caja', clave: 'id', perfil: true, libro: INV, propio: renderCaja,
+		cols: [T('fecha', '@'), T('accion'), T('moneda'), N('monto'), T('grupo'), T('nota'), ID]
+	},
+	{
+		tabla: 'precio_historico', hoja: '_precios', clave: 'id', perfil: true, libro: INV, propio: renderPrecios,
+		cols: [ID, T('ticker'), T('fecha', '@'), N('precio')]
+	},
+	{
+		tabla: 'snapshot', hoja: '_fotos', clave: 'fecha', perfil: true, libro: INV, propio: renderFotos,
+		cols: [T('fecha', '@'), N('valor_usd'), N('flujo_usd'), N('dolar'), N('valor_ars')]
+	}
 ];
+
+if (new Set(TABLAS.map((t) => t.hoja)).size !== TABLAS.length) throw new Error('tablas.ts: nombres de pestaña repetidos');
 
 export const HOJAS_CON_ID = TABLAS.filter((t) => t.clave === 'id').map((t) => t.hoja);
 export const sqlDe = (c: Col) => c.sql ?? c.hoja;
 
 // Claves de meta que son estado técnico de ESTE dispositivo (timestamps de
 // refresco, marcas de migración, copias): no viajan a la Sheet.
-const META_LOCAL = /^(ultima_|autobackup_|cotizaciones_|dolar_actualizado|precios_actualizados|reset_|liquidez_migrada|fotos_|fecha_corte_)/;
+// fotos_pendientes_desde SÍ viaja: si se corta un recálculo de fotos, cualquier
+// teléfono lo retoma al abrir (las fotos viven en la Sheet).
+const META_LOCAL = /^(ultima_|autobackup_|cotizaciones_|dolar_actualizado|precios_actualizados|reset_|liquidez_migrada|fotos_(?!pendientes_desde)|fecha_corte_)/;
 export const metaSincroniza = (clave: string) => !META_LOCAL.test(clave);
 
 // ---------------------------------------------------------------------------
@@ -154,6 +198,7 @@ export async function render(): Promise<Render> {
 
 	const out: Render = {};
 	for (const t of TABLAS) {
+		if (t.propio) { out[t.hoja] = await t.propio(); continue; }
 		const sqlCols = t.cols.map(sqlDe);
 		const extra = t.tabla === 'gasto' ? ', detalle AS _det' : '';
 		const rows = (await query(`SELECT ${sqlCols.join(', ')}${extra} FROM ${t.tabla}`)) as any[];
@@ -183,12 +228,23 @@ export async function render(): Promise<Render> {
 // Carga: filas de la Sheet -> base
 // ---------------------------------------------------------------------------
 export type HojaCruda = { header: string[]; filas: unknown[][] };
-export type Payload = { hojas: Record<string, HojaCruda> };
+// inv: la Sheet "Inversiones". Falta si el Apps Script es de la versión anterior;
+// trae error si el script no la encuentra (falta el ID o no hay acceso).
+export type LibroInv = { hojas?: Record<string, HojaCruda>; nombre?: string; url?: string; error?: string };
+export type Payload = { hojas: Record<string, HojaCruda>; inv?: LibroInv; version?: number };
 export type ResultadoCarga = {
 	avisos: string[]; // filas que no se pudieron leer
 	creadas: Record<string, string[]>; // hoja -> claves creadas por la app al cargar (hay que subirlas)
 	hojasPresentes: Set<string>;
+	invOk: boolean; // se pudo leer la Sheet Inversiones (y se puede escribir en ella)
 };
+
+export function invDisponible(p: Payload): boolean {
+	return !!p.inv && !p.inv.error && !!p.inv.hojas;
+}
+export function hojaCruda(p: Payload, t: Tabla): HojaCruda | undefined {
+	return libroDe(t) === 'inversiones' ? p.inv?.hojas?.[t.hoja] : p.hojas[t.hoja];
+}
 
 type Obj = Record<string, Valor>;
 
@@ -219,14 +275,16 @@ function tipoIngreso(v: Valor): 'Sueldo' | 'Aciclico' | null | undefined {
 export async function cargar(p: Payload): Promise<ResultadoCarga> {
 	const avisos: string[] = [];
 	const creadas: Record<string, string[]> = {};
-	const hojasPresentes = new Set(Object.keys(p.hojas));
+	const invOk = invDisponible(p);
+	const hojasPresentes = new Set([...Object.keys(p.hojas), ...(invOk ? Object.keys(p.inv!.hojas!) : [])]);
 	const marcarCreada = (hoja: string, clave: number | string) => { (creadas[hoja] ??= []).push(String(clave)); };
 
 	// Filas normalizadas por tabla (objetos con columnas SQL).
 	const datos: Record<string, Obj[]> = {};
 	for (const t of TABLAS) {
 		const filas: Obj[] = [];
-		for (const { obj, fila } of objetos(p.hojas[t.hoja])) {
+		if (libroDe(t) === 'inversiones' && !invOk) { datos[t.tabla] = filas; continue; }
+		for (const { obj, fila } of objetos(hojaCruda(p, t))) {
 			const o: Obj = { _fila: fila };
 			for (const c of t.cols) o[c.hoja] = normalizar(c, obj[c.hoja]);
 			filas.push(o);
@@ -273,7 +331,11 @@ export async function cargar(p: Payload): Promise<ResultadoCarga> {
 	// El nombre puede estar vacío (perfil creado por la app sin nombre): en la
 	// Sheet queda '' y se lee como null, pero la base exige texto.
 	let perfiles: Obj[] = datos.perfil.filter((o) => o.id === 1).map((o) => ({ ...o, nombre: o.nombre ?? '' }));
-	const hayDatos = datos.gasto.length + datos.ingreso.length > 0;
+	const datosInv: DatosInv = {
+		activos: datos.transaccion, renta: datos.renta_activo, caja: datos.mov_caja, catalogo: datos.activo,
+		cuentas: datos.cuenta_inversion, precios: datos.precio_historico, fotos: datos.snapshot
+	};
+	const hayDatos = datos.gasto.length + datos.ingreso.length > 0 || hayDatosInversiones(datosInv);
 	if (!perfiles.length && hayDatos) {
 		perfiles = [{ id: 1, nombre: '', modo_periodo: 'sueldo', creado_en: null }];
 		marcarCreada('_perfil', 1);
@@ -429,7 +491,7 @@ export async function cargar(p: Payload): Promise<ResultadoCarga> {
 		['meta', meta],
 		['notif_visto', notif]
 	];
-	const stmts: { sql: string; bind: unknown[]; tabla: string; fila: Obj }[] = [];
+	const stmts: { sql: string; bind: unknown[]; hoja: string; ref: Valor }[] = [];
 	for (const [tabla, filas] of porTabla) {
 		const t = TABLAS.find((x) => x.tabla === tabla)!;
 		for (const f of filas) {
@@ -438,17 +500,19 @@ export async function cargar(p: Payload): Promise<ResultadoCarga> {
 			const cols = Object.keys(f).filter((k) => !k.startsWith('_') && f[k] != null);
 			if (t.perfil) cols.push('perfil_id');
 			const vals = cols.map((k) => (k === 'perfil_id' ? 1 : f[k]));
-			stmts.push({ sql: `INSERT INTO ${tabla} (${cols.join(',')}) VALUES (${cols.map(() => '?').join(',')})`, bind: vals, tabla, fila: f });
+			stmts.push({ sql: `INSERT INTO ${tabla} (${cols.join(',')}) VALUES (${cols.map(() => '?').join(',')})`, bind: vals, hoja: t.hoja, ref: (f.id ?? f.clave) as Valor });
 		}
 	}
+	// Inversiones (si el puente trae la Sheet): después de perfil (foreign keys).
+	if (invOk) stmts.push(...prepararInversiones(datosInv, avisos, marcarCreada));
 	try {
 		await queryBatch(stmts.map((s) => ({ sql: s.sql, bind: s.bind })));
 	} catch {
 		// Algo violó una regla de la base: se carga de a una fila y se informa cuál.
 		for (const s of stmts) {
 			try { await query(s.sql, s.bind); }
-			catch (e: any) { avisos.push(`${TABLAS.find((x) => x.tabla === s.tabla)!.hoja} id ${s.fila.id ?? s.fila.clave}: ${e?.message ?? e}`); }
+			catch (e: any) { avisos.push(`${s.hoja} ${s.ref ?? ''}: ${e?.message ?? e}`); }
 		}
 	}
-	return { avisos, creadas, hojasPresentes };
+	return { avisos, creadas, hojasPresentes, invOk };
 }

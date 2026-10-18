@@ -85,6 +85,11 @@ async function init() {
 	if (!acols.some((c: any) => c.name === 'simbolo_cotizacion')) {
 		db.exec('ALTER TABLE activo ADD COLUMN simbolo_cotizacion TEXT');
 	}
+	// Rienda + Sheets: splits / cambios de ratio del activo (ver splits.ts). Texto
+	// "AAAA-MM-DD:factor[; ...]"; NULL = sin cambios.
+	if (!acols.some((c: any) => c.name === 'splits')) {
+		db.exec('ALTER TABLE activo ADD COLUMN splits TEXT');
+	}
 	// Columna exposicion (Dolar | CER | Peso): a qué tipo de cambio está atado el
 	// valor del activo. Se agrega sin CHECK (ALTER) y se backfillea por regla: USD,
 	// CEDEAR o Indice -> Dolar (los índices en ARS son igual que un CEDEAR: cotizan

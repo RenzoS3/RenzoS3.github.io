@@ -35,7 +35,8 @@ terminar, cerrá esa ventana.
 1. Arriba de todo en `Código.gs`, pegá esa URL entre las comillas de
    `URL_WEBAPP`, por ejemplo:
    `const URL_WEBAPP = 'https://script.google.com/macros/s/AKfy…/exec';`
-   Guardá.
+   Si también usás Inversiones, pegá en `ID_INVERSIONES` el ID de esa Sheet
+   (lo que va entre `/d/` y `/edit` en su dirección). Guardá.
 2. En el desplegable de funciones (al lado de ▶ Ejecutar) elegí
    **configurar** y tocá **▶ Ejecutar**.
 3. Abajo, en el **Registro de ejecución**, aparece **"LISTO. Abrí este link
@@ -62,6 +63,27 @@ No compartas ese link: con él se pueden leer y escribir esas finanzas.
   (categorías, diccionario, tarjetas, recurrentes, presupuestos, ajustes, perfil).
 - La app nunca borra más de unas pocas filas de una vez: si algo intenta borrar
   muchas, se frena y avisa.
+
+## Sheet "Inversiones"
+
+El mismo script abre también la Sheet Inversiones (por su `ID_INVERSIONES`):
+
+- **Activos**, **Renta y amortización** y **Caja** quedan con el formato de la
+  planilla de Rienda, más una columna **id** al final (no la toques).
+- En Activos, `moneda` y `monto_total` son lo que pagaste o cobraste. Si un
+  CEDEAR que cotiza en pesos lo pagaste en dólares, `valor_dolar` convierte.
+- Columnas propias como `monto_ars` no se pisan, y las filas nuevas copian la
+  fórmula de la fila de arriba. Posicion y Pendientes no se tocan.
+- Caja: `Ingreso` (positivo), `Retiro` (negativo; también acepta "Egreso" o el
+  monto sin signo) y `Convertir` (dos filas con el mismo `grupo`: sale una
+  moneda, entra la otra).
+- Pestañas ocultas: `_activos` (catálogo: exposición, símbolo de cotización y
+  **splits**), `_cuentas`, `_precios` (precios corregidos a mano) y `_fotos`
+  (valor diario de la cartera, para Evolución de cartera).
+- **Splits o cambios de ratio**: en `_activos`, columna `splits`, con el formato
+  `AAAA-MM-DD:factor` (varios separados por `;`), por ejemplo SPY `2026-06-01:3`.
+  El histórico de data912 viene sin ajustar; con esto los precios anteriores se
+  dividen por el factor (el día exacto la app lo busca en la serie).
 
 ## Si actualizo el script
 

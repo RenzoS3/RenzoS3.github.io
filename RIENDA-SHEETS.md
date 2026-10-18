@@ -13,6 +13,11 @@ almacenamiento del navegador, para que funcione en iPhone sin perder datos.
   - `tablas.ts` — qué tabla va en qué pestaña y cómo se convierte.
   - `sync.svelte.ts` — arranque, cola de cambios, copia sin señal, seguridad.
   - `conexion.ts` — enlace de conexión y llamadas al Apps Script.
+  - `inversiones.ts` — fase 2: Activos, Renta y amortización, Caja y las
+    ocultas `_activos`, `_cuentas`, `_precios`, `_fotos` en la Sheet "Inversiones".
+  - `mercado.ts` / `cacheMercado.ts` — al abrir: precios, histórico de data912
+    (copia en el teléfono, se vuelve a bajar si falta) y reconstrucción de las
+    fotos diarias desde el primer movimiento (una vez; después viven en `_fotos`).
 - **Puente**: `apps-script/Code.gs`, un Apps Script dentro de la Sheet
   (instalación en `apps-script/LEEME.md`).
 - **Sin señal**: la cola de cambios y una copia de los datos quedan en el
@@ -20,8 +25,12 @@ almacenamiento del navegador, para que funcione en iPhone sin perder datos.
 - **Seguridad**: nunca se sube una base vacía (si el worker se reinicia, la app
   recarga desde la Sheet) y los borrados masivos se frenan en la app y en el
   script.
-- **Se apagó**: copias de seguridad locales, importar/borrar todo desde la app
-  (la Sheet ya es el respaldo) y el menú de Inversiones (fase 2).
+- **Se apagó**: copias de seguridad locales e importar/borrar todo desde la app
+  (la Sheet ya es el respaldo).
+- **Inversiones (fase 2)**: igual que Rienda, con los datos en la Sheet
+  "Inversiones" (la abre el mismo Apps Script por su ID). Agregado propio:
+  splits o cambios de ratio por activo (`src/lib/db/splits.ts`), porque el
+  histórico de data912 viene sin ajustar.
 
 ## Desarrollo local
 
