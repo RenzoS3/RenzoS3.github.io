@@ -270,7 +270,9 @@ export async function cargar(p: Payload): Promise<ResultadoCarga> {
 	}
 
 	// ----- Perfil -----
-	let perfiles = datos.perfil.filter((o) => o.id === 1);
+	// El nombre puede estar vacío (perfil creado por la app sin nombre): en la
+	// Sheet queda '' y se lee como null, pero la base exige texto.
+	let perfiles = datos.perfil.filter((o) => o.id === 1).map((o) => ({ ...o, nombre: o.nombre ?? '' }));
 	const hayDatos = datos.gasto.length + datos.ingreso.length > 0;
 	if (!perfiles.length && hayDatos) {
 		perfiles = [{ id: 1, nombre: '', modo_periodo: 'sueldo', creado_en: null }];

@@ -278,6 +278,10 @@ export async function guardarMacro() {
 }
 
 async function cargarMacro() {
+	// Usuario nuevo (Sheet vacía): todavía no hay perfil y las cotizaciones lo
+	// referencian. crearPerfil() carga las de arranque después de crearlo.
+	const hayPerfil = ((await query('SELECT COUNT(*) AS n FROM perfil')) as any[])[0].n > 0;
+	if (!hayPerfil) return;
 	let obj: any = null;
 	try { obj = JSON.parse(localStorage.getItem(LS_MACRO) ?? 'null'); } catch { /* ignore */ }
 	if (obj?.dolar?.length) {
@@ -392,6 +396,17 @@ export async function iniciar(): Promise<void> {
 	await arreglosPostCarga();
 	sync.estado = 'listo';
 	await detectar();
+}
+
+// Compara y encola YA lo que haya cambiado, y trata de subirlo. Se usa antes
+// de recargar la página (crear el perfil, restaurar una copia): si no hay señal,
+// la cola queda guardada en el teléfono y se sube al volver a abrir.
+export async function guardarAhora(): Promise<boolean> {
+	if (timerDetectar) { clearTimeout(timerDetectar); timerDetectar = null; }
+	while (detectando) await new Promise((r) => setTimeout(r, 50));
+	await detectar();
+	while (enVuelo) await new Promise((r) => setTimeout(r, 100));
+	return vaciarCola();
 }
 
 // Recarga completa desde la Sheet (botón en "Tus datos").

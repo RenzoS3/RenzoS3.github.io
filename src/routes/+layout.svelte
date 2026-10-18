@@ -20,7 +20,7 @@
 	import { ErrorValidacion } from '$lib/errores';
 	import { compartirOdescargarTexto } from '$lib/db/backup';
 	import DiagnosticoTecnico from '$lib/DiagnosticoTecnico.svelte';
-	import { sync, iniciar } from '$lib/sheets/sync.svelte';
+	import { sync, iniciar, guardarAhora } from '$lib/sheets/sync.svelte';
 	import { parsearEnlace, guardarConexion, ping, borrarConexion } from '$lib/sheets/conexion';
 
 	onNavigate((navigation) => {
@@ -252,7 +252,8 @@
 		if (!nombreNuevo.trim()) { bienvenidaMsg = 'Escribí tu nombre.'; return; }
 		if (!modoNuevo) { bienvenidaMsg = 'Elegí una opción de ingresos.'; return; }
 		creando = true; bienvenidaMsg = '';
-		try { await crearPerfil(nombreNuevo, modoNuevo); location.href = '/'; } // salir del onboarding siempre en Cuenta Corriente
+		// Rienda + Sheets: el perfil y las categorías se guardan en la Sheet antes de recargar.
+		try { await crearPerfil(nombreNuevo, modoNuevo); await guardarAhora(); location.href = '/'; } // salir del onboarding siempre en Cuenta Corriente
 		catch (e: any) {
 			console.error(e); // Brief H / B3: detalle a consola, no crudo en pantalla.
 			bienvenidaMsgErr = true;
@@ -271,6 +272,7 @@
 			const { setMeta } = await import('$lib/db/meta');
 			await importarDatos(file);
 			await setMeta('ultima_importacion', new Date().toISOString());
+			await guardarAhora(); // Rienda + Sheets: lo restaurado se guarda en la Sheet
 			alert('Importación completa. La página se va a recargar.');
 			location.href = '/'; // salir del onboarding siempre en Cuenta Corriente
 		} catch (err: any) {
@@ -545,7 +547,7 @@
 					</div>
 					<p class="bsub">Lo cambiás cuando quieras en Configuración.</p>
 				{:else if paso === 4}
-					<p class="bp">Tus datos viven solo en este teléfono. Conviene instalar la app:</p>
+					<p class="bp">Tus datos se guardan en tu Google Sheet. Conviene instalar la app:</p>
 					<InstalarApp compacto mostrarInstalada dismissible={false} />
 				{:else}
 					<p class="bp">Listo. Cargá un gasto y arrancá. Lo demás aparece cuando lo quieras.</p>

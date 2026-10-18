@@ -12,9 +12,10 @@
  */
 
 // ---- Ajustes ----------------------------------------------------------------
-const NOMBRE_PERFIL = 'Renzo';
-const MODO_PERIODO = 'sueldo'; // 'sueldo' (el período lo abre el día de cobro) o 'calendario'
-const APP_URL = 'https://renzos3.github.io/'; // URL de la app (GitHub Pages), para armar el enlace de conexión
+// Pegá entre las comillas la "URL de la aplicación web" que te da Implementar
+// (termina en /exec). Hace falta para que configurar() arme el link del iPhone.
+const URL_WEBAPP = '';
+const APP_URL = 'https://renzos3.github.io/'; // URL de la app (GitHub Pages)
 const MAX_BORRADOS = 30;       // borrados por pestaña en un solo envío: más que esto se frena
 const COLS_TEXTO = { Gastos: ['fecha', 'mes_inicio_pago'], Ingresos: ['fecha', 'periodo'] };
 const COLS_MES = ['mes_inicio_pago', 'periodo'];
@@ -259,25 +260,18 @@ function configurar() {
   }
   // Fechas y meses como texto (si no, Sheets los convierte solo en fechas).
   Object.keys(COLS_TEXTO).forEach(function (nombre) { prepararTexto_(ss, nombre, COLS_TEXTO[nombre]); });
-  // Perfil
-  if (!ss.getSheetByName('_perfil')) {
-    const sh = ss.insertSheet('_perfil');
-    sh.getRange(1, 1, sh.getMaxRows(), 4).setNumberFormat('@');
-    const ahora = Utilities.formatDate(new Date(), ss.getSpreadsheetTimeZone(), 'yyyy-MM-dd HH:mm:ss');
-    sh.getRange(1, 1, 2, 4).setValues([['id', 'nombre', 'modo_periodo', 'creado_en'], ['1', NOMBRE_PERFIL, MODO_PERIODO, ahora]]);
-    sh.getRange(1, 1, 1, 4).setFontWeight('bold');
-    sh.hideSheet();
-  }
-  const url = ScriptApp.getService().getUrl();
-  if (!url) {
-    Logger.log('Todavía no está implementado como App web. Hacé Implementar → Nueva implementación → App web y volvé a correr configurar().');
-    Logger.log('Tu clave (no la compartas): ' + clave);
+  // El nombre y el tipo de período los pregunta la app la primera vez que se abre.
+  // La URL buena es la de la implementación (/exec). Desde el editor Google a veces
+  // devuelve la de prueba (/dev), que no sirve para el teléfono.
+  const url = String(URL_WEBAPP || ScriptApp.getService().getUrl() || '').trim();
+  if (!/\/exec$/.test(url)) {
+    Logger.log('Falta un paso: copiá la "URL de la aplicación web" (Implementar → Gestionar implementaciones; termina en /exec), ' +
+      'pegala arriba de todo entre las comillas de URL_WEBAPP, guardá y volvé a ejecutar configurar.');
     return;
   }
   const enlace = url + '?k=' + clave;
-  Logger.log('Enlace de conexión (no lo compartas):\n' + enlace);
-  if (APP_URL) Logger.log('Abrí esto en el iPhone para conectar la app de una:\n' + APP_URL + '#conectar=' + encodeURIComponent(enlace));
-  Logger.log('Si el enlace no termina en /exec, usá la URL de Implementar → Gestionar implementaciones y agregale ?k=' + clave);
+  Logger.log('LISTO. Abrí este link en el iPhone (no lo compartas con nadie):\n' + APP_URL + '#conectar=' + encodeURIComponent(enlace));
+  Logger.log('Si la app instalada te pide el enlace de conexión, pegá este:\n' + enlace);
 }
 
 function prepararTexto_(ss, nombre, cols) {
